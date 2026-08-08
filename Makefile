@@ -13,7 +13,8 @@ LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
            src/json.c src/profile.c src/plan.c src/apply.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c src/cli/cmd_plan.c \
-           src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c
+           src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c \
+           src/cli/cmd_forge.c
 INGOT    = third_party/ingot/ingot.c
 
 SRC      = $(LIB_SRC) $(CLI_SRC) $(INGOT)
@@ -58,6 +59,8 @@ test: build/test_model build/test_accum build/test_compare build/test_plan \
 	./poe estimate build/smoke.poeplan build/plan-fix.gguf
 	./poe apply build/smoke.poeplan build/plan-fix.gguf -o build/smoke-pruned.gguf
 	./poe inspect build/smoke-pruned.gguf
+	./poe forge build/plan-fix.gguf --profile build/plan.poeprofile --prune 25% -o build/forged.gguf
+	cmp build/smoke-pruned.gguf build/forged.gguf
 	./poe plan build/plan-fix.gguf --profile build/plan.poeprofile --method frequency --prune 50% -o build/smoke50.poeplan > /dev/null
 	./poe diff build/smoke.poeplan build/smoke50.poeplan
 	./poe diff build/pa.poeprofile build/pb.poeprofile

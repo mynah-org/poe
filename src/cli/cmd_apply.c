@@ -18,6 +18,43 @@ static int same_inode(const char *a, const char *b) {
     return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 }
 
+/* Reopen a freshly written pruned checkpoint and verify structure, expert
+ * count and exact byte accounting against the plan. Shared with forge.
+ * Prints its findings; returns 0 when everything checks out. */
+int poe_cli_verify_pruned(const poe_model *m, const poe_plan *p,
+                          const char *out_path, int force) {
+    char err[256];
+    const uint64_t want = p->bytes_before - p->bytes_removed;
+    poe_model *o;
+    if (poe_model_open(&o, out_path, err, sizeof err) != 0) {
+        fprintf(stderr, "poe: output does not reopen: %s\n", err);
+        return 1;
+    }
+    int rc = 0;
+    printf("\nVerification\n");
+    if (o->n_blocks != m->n_blocks || o->n_moe_blocks != m->n_moe_blocks) {
+        printf("  BLOCK MISMATCH: %u blocks (%u MoE), expected %u (%u)\n",
+               o->n_blocks, o->n_moe_blocks, m->n_blocks, m->n_moe_blocks);
+        rc = 1;
+    }
+    if (o->expert_count != p->keep_per_layer) {
+        printf("  EXPERT COUNT MISMATCH: output has %u, plan keeps %u\n",
+               o->expert_count, p->keep_per_layer);
+        rc = 1;
+    }
+    if (!force && o->total_bytes != want) {
+        printf("  SIZE MISMATCH: output payload %llu bytes, plan expects %llu\n",
+               (unsigned long long)o->total_bytes, (unsigned long long)want);
+        rc = 1;
+    }
+    if (rc == 0)
+        printf("  ok: %u blocks, %u experts per layer, exact bytes as planned\n",
+               o->n_blocks, o->expert_count);
+    printf("  output fingerprint %s\n", o->fingerprint);
+    poe_model_close(o);
+    return rc;
+}
+
 int poe_cmd_apply(int argc, char **argv) {
     const char *plan_path = NULL, *model_path = NULL, *out_path = NULL;
     int force = 0;
@@ -91,38 +128,7 @@ int poe_cmd_apply(int argc, char **argv) {
                ? 100.0 * (double)st.payload_bytes / (double)m->total_bytes
                : 0.0);
 
-    /* reopen and verify: structure, expert count, exact accounting */
-    const uint64_t want = p->bytes_before - p->bytes_removed;
-    poe_model *o;
-    if (poe_model_open(&o, out_path, err, sizeof err) != 0) {
-        fprintf(stderr, "poe apply: output does not reopen: %s\n", err);
-        poe_model_close(m);
-        poe_plan_free(p);
-        return 1;
-    }
-    int rc = 0;
-    printf("\nVerification\n");
-    if (o->n_blocks != m->n_blocks || o->n_moe_blocks != m->n_moe_blocks) {
-        printf("  BLOCK MISMATCH: %u blocks (%u MoE), expected %u (%u)\n",
-               o->n_blocks, o->n_moe_blocks, m->n_blocks, m->n_moe_blocks);
-        rc = 1;
-    }
-    if (o->expert_count != p->keep_per_layer) {
-        printf("  EXPERT COUNT MISMATCH: output has %u, plan keeps %u\n",
-               o->expert_count, p->keep_per_layer);
-        rc = 1;
-    }
-    if (!force && o->total_bytes != want) {
-        printf("  SIZE MISMATCH: output payload %llu bytes, plan expects %llu\n",
-               (unsigned long long)o->total_bytes, (unsigned long long)want);
-        rc = 1;
-    }
-    if (rc == 0)
-        printf("  ok: %u blocks, %u experts per layer, exact bytes as planned\n",
-               o->n_blocks, o->expert_count);
-    printf("  output fingerprint %s\n", o->fingerprint);
-
-    poe_model_close(o);
+    int rc = poe_cli_verify_pruned(m, p, out_path, force);
     poe_model_close(m);
     poe_plan_free(p);
     return rc;

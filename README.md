@@ -29,7 +29,9 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe estimate` | ✅ plan accounting + fingerprint/byte verification against the source model |
 | `poe diff` | ✅ plans (prune-set agreement), profiles, and structural model diffs |
 | `poe apply` | ✅ structural GGUF pruning: slices packed expert tensors along the expert dimension, compacts router rows in keep order, patches `expert_count`, preserves all other metadata byte-for-byte; streams mmap → output, then reopens and verifies exact accounting |
-| `poe forge` / `validate` | planned — see [vision.md](vision.md) |
+| `poe forge` | ✅ the whole pipeline in one command: (profile via `poe-profile` →) plan → exact estimate → apply → verify, intermediate artifacts preserved next to the output |
+| `tools/coding_eval.py` | ✅ pruned-vs-full behavioral eval: 10 coding tasks (easy→hard) generated at temp 0 through llama-server, compiled/executed against hidden test cases; win/fail per task + prompt/generation t/s |
+| `poe validate` | planned — see [vision.md](vision.md) |
 
 ## Build
 
@@ -67,6 +69,12 @@ poe inspect model.gguf --json         # machine-readable output
 ```sh
 # materialize a plan: 17.3 GiB -> 13.2 GiB, no training, exact bytes
 poe apply coding-reap25.poeplan model.gguf -o model-pruned.gguf
+
+# or the whole pipeline in one command (profile -> plan -> apply -> verify)
+poe forge model.gguf --dataset code.txt -o model-coding.gguf
+
+# behavioral check: did pruning cost anything on real coding tasks?
+python3 tools/coding_eval.py model.gguf model-coding.gguf
 ```
 
 Static commands (`inspect`, `experts`, `routing-budget`, `estimate`, `plan`,
