@@ -87,6 +87,25 @@ int main(void) {
     CHECK(m->total_bytes == m->expert_bytes + m->router_bytes + m->other_bytes,
           "total = experts + routers + other");
 
+    /* Parameter accounting (elements, not bytes) — the R0 routing-budget
+     * numbers are built from these. */
+    const uint64_t expert_params_blk =
+        (uint64_t)POE_FIX_EXPERTS * POE_FIX_EMBD * POE_FIX_FF * 3;
+    CHECK(m->expert_params == expert_params_blk * POE_FIX_BLOCKS,
+          "expert params %llu", (unsigned long long)m->expert_params);
+    CHECK(m->router_params ==
+              (uint64_t)POE_FIX_EMBD * POE_FIX_EXPERTS * POE_FIX_BLOCKS,
+          "router params %llu", (unsigned long long)m->router_params);
+    CHECK(m->embedding_params == (uint64_t)POE_FIX_EMBD * POE_FIX_VOCAB,
+          "embedding params %llu", (unsigned long long)m->embedding_params);
+    CHECK(m->shared_params == 0, "no shared expert params");
+    CHECK(m->total_params == m->expert_params + m->router_params +
+                             m->embedding_params + m->other_params,
+          "param buckets add up to total");
+    CHECK(m->blocks[0].expert_params == expert_params_blk,
+          "per-block expert params %llu",
+          (unsigned long long)m->blocks[0].expert_params);
+
     CHECK(strncmp(m->fingerprint, "poe1:", 5) == 0 && strlen(m->fingerprint) == 21,
           "fingerprint format %s", m->fingerprint);
 

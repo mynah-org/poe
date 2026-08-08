@@ -22,6 +22,7 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 |---|---|
 | `poe inspect` | ✅ static MoE structure, storage accounting, theoretical reductions |
 | `poe experts` | ✅ expert tensor mapping and sizes |
+| `poe routing-budget` | ✅ exact active-parameter accounting per routed-K |
 | `poe profile` / `compare` / `plan` / `estimate` / `apply` / `forge` / `diff` / `validate` | planned — see [vision.md](vision.md) |
 
 ## Build
@@ -51,12 +52,13 @@ Storage
 ```
 
 ```sh
-poe experts model.gguf --layer 17   # expert tensor mapping for one block
-poe inspect model.gguf --json       # machine-readable output
+poe experts model.gguf --layer 17     # expert tensor mapping for one block
+poe routing-budget model.gguf         # ActiveParams(K) table, exact, per routed-K
+poe inspect model.gguf --json         # machine-readable output
 ```
 
-Static commands (`inspect`, `experts`, `estimate`, `plan`, `diff`) never run
-inference and never require a GPU.
+Static commands (`inspect`, `experts`, `routing-budget`, `estimate`, `plan`,
+`diff`) never run inference and never require a GPU.
 
 ## Design
 
@@ -66,6 +68,9 @@ inference and never require a GPU.
   workload profiling, expert saliency (REAP first), pruning/merging plans,
   hardware-aware planning.
 - **Training-free by default**: profile → plan → apply, no gradients.
+- **Three optimization axes**, independent and combinable: what exists
+  (pruning/merging/quantization), what executes (adaptive routing and
+  expert skipping), where it lives (GPU/CPU expert residency).
 - **Reproducible artifacts**: profiles (`.poeprofile`) and plans (`.poeplan`)
   are persistent, versioned, and bound to model fingerprints.
 

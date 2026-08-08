@@ -45,6 +45,9 @@ typedef struct {
     uint64_t expert_bytes;             /* routed expert weights + biases     */
     uint64_t router_bytes;
     uint64_t shared_bytes;             /* shared-expert (shexp) tensors      */
+
+    /* Exact parameter counts (tensor elements), per block. */
+    uint64_t expert_params;            /* all routed experts together        */
 } poe_block;
 
 typedef struct {
@@ -71,6 +74,17 @@ typedef struct {
     uint64_t shared_bytes;
     uint64_t other_bytes;
 
+    /* Whole-model parameter accounting (tensor elements), exact. The
+     * embeddings (token_embd / output head) are split out so active-param
+     * figures can be reported with and without them.
+     * total = expert + router + shared + embedding + other. */
+    uint64_t total_params;
+    uint64_t expert_params;            /* routed experts, all blocks         */
+    uint64_t router_params;
+    uint64_t shared_params;
+    uint64_t embedding_params;
+    uint64_t other_params;
+
     /* Structural fingerprint: FNV-1a over architecture, the full tensor
      * table (names, types, shapes, sizes), metadata keys/scalars, and the
      * first bytes of every tensor payload. Binds profiles and plans to a
@@ -87,6 +101,9 @@ void poe_model_close(poe_model *m);
 
 /* "25.7 GiB" style human formatting (binary units, one decimal). */
 void poe_format_bytes(uint64_t bytes, char *dst, size_t dstsz);
+
+/* "3.2B" / "245.1M" style parameter-count formatting (decimal units). */
+void poe_format_params(uint64_t params, char *dst, size_t dstsz);
 
 #ifdef __cplusplus
 }

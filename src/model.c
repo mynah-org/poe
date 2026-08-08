@@ -199,6 +199,11 @@ int poe_model_open(poe_model **out, const char *path, char *err, size_t errsz) {
 
         if (parse_block(t->name, &b, &rest) != 0 || b >= m->n_blocks) {
             m->other_bytes += t->nbytes;
+            if (strcmp(t->name, "token_embd.weight") == 0 ||
+                strcmp(t->name, "output.weight") == 0)
+                m->embedding_params += t->nelem;
+            else
+                m->other_params += t->nelem;
             continue;
         }
         poe_block *blk = &m->blocks[b];
@@ -206,15 +211,18 @@ int poe_model_open(poe_model **out, const char *path, char *err, size_t errsz) {
         if (name_is(rest, "ffn_gate_inp.weight")) {
             blk->router_w = t;
             blk->router_bytes += t->nbytes;
+            m->router_params += t->nelem;
         } else if (name_is(rest, "ffn_gate_inp.bias") ||
                    name_is(rest, "exp_probs_b.bias")) {
             blk->router_b = t;
             blk->router_bytes += t->nbytes;
+            m->router_params += t->nelem;
         } else if (name_has_prefix(rest, "ffn_gate_exps.") ||
                    name_has_prefix(rest, "ffn_up_exps.")   ||
                    name_has_prefix(rest, "ffn_down_exps.")) {
             blk->is_moe = 1;
             blk->expert_bytes += t->nbytes;
+            blk->expert_params += t->nelem;
 
             int is_weight = strstr(rest, ".weight") != NULL;
             if (name_has_prefix(rest, "ffn_gate_exps.")) {
@@ -234,15 +242,18 @@ int poe_model_open(poe_model **out, const char *path, char *err, size_t errsz) {
                    name_has_prefix(rest, "ffn_gate_inp_shexp.")) {
             blk->has_shared_expert = 1;
             blk->shared_bytes += t->nbytes;
+            m->shared_params += t->nelem;
         } else {
             uint32_t e;
             if (parse_legacy_expert(rest, &e) == 0) {
                 blk->is_moe = 1;
                 blk->is_legacy_split = 1;
                 blk->expert_bytes += t->nbytes;
+                blk->expert_params += t->nelem;
                 if (e + 1 > blk->expert_count) blk->expert_count = e + 1;
             } else {
                 m->other_bytes += t->nbytes;
+                m->other_params += t->nelem;
             }
         }
     }
@@ -255,12 +266,15 @@ int poe_model_open(poe_model **out, const char *path, char *err, size_t errsz) {
             if (blk->expert_count > m->expert_count)
                 m->expert_count = blk->expert_count;
         }
-        m->expert_bytes += blk->expert_bytes;
-        m->router_bytes += blk->router_bytes;
-        m->shared_bytes += blk->shared_bytes;
+        m->expert_bytes  += blk->expert_bytes;
+        m->router_bytes  += blk->router_bytes;
+        m->shared_bytes  += blk->shared_bytes;
+        m->expert_params += blk->expert_params;
     }
     m->total_bytes = m->expert_bytes + m->router_bytes +
                      m->shared_bytes + m->other_bytes;
+    m->total_params = m->expert_params + m->router_params + m->shared_params +
+                      m->embedding_params + m->other_params;
 
     fingerprint(g, m->fingerprint, sizeof m->fingerprint);
 

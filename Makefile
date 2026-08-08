@@ -10,7 +10,8 @@ INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
 LIB_SRC  = src/model.c src/fmt.c
-CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c
+CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
+           src/cli/cmd_budget.c
 INGOT    = third_party/ingot/ingot.c
 
 SRC      = $(LIB_SRC) $(CLI_SRC) $(INGOT)
@@ -42,6 +43,8 @@ test: build/test_model poe | build
 	./poe inspect build/fixture-moe.gguf --json > /dev/null
 	./poe experts build/fixture-moe.gguf --layer 1
 	./poe experts build/fixture-moe.gguf --json > /dev/null
+	./poe routing-budget build/fixture-moe.gguf
+	./poe routing-budget build/fixture-moe.gguf --json > /dev/null
 
 build/test_model: tests/test_model.o tests/fixture.o src/model.o src/fmt.o \
                   third_party/ingot/ingot.o | build
