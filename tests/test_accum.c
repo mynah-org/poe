@@ -70,6 +70,20 @@ int main(void) {
     poe_accum_observe_selection(&a, 0, 1, badids, badwts, &bad);
     CHECK(bad == 2, "out-of-range ids counted (%llu)", (unsigned long long)bad);
 
+    /* ── REAP accumulation: gate x norm, mean over routed tokens ───────── */
+    const int32_t rids[4] = { 0, 2,   0, 1 };
+    const float   rwts[4] = { 0.6f, 0.4f, 0.5f, 0.5f };
+    const float   rnrm[4] = { 2.0f, 1.0f, 4.0f, 3.0f };
+    poe_accum_observe_reap(&a, 1, 2, rids, rwts, rnrm, &bad);
+    /* expert0: (0.6*2 + 0.5*4)/2 = 1.6 ; expert1: 0.5*3 = 1.5 ; expert2: 0.4 */
+    CHECK(a.reap_count[4 + 0] == 2 && a.reap_count[4 + 1] == 1 &&
+          a.reap_count[4 + 2] == 1, "reap counts 2/1/1");
+    CHECK(feq(a.reap_sum[4 + 0] / 2.0, 1.6), "reap mean expert0 = 1.6");
+    CHECK(feq(a.reap_sum[4 + 1], 1.5) && feq(a.reap_sum[4 + 2], 0.4),
+          "reap sums expert1/2");
+    CHECK(feq(a.norm_sum[4 + 0], 6.0), "activation-norm sum expert0 = 6");
+    CHECK(bad == 2, "reap left bad_ids untouched");
+
     /* ── JSON body is well-formed enough to be embedded ────────────────── */
     FILE *f = fopen("build/accum.json", "w");
     fprintf(f, "{\"layers\":\n");

@@ -18,11 +18,14 @@ int poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,
     size_t le = (size_t)n_layers * n_experts;
     a->sel_count   = calloc(le, sizeof *a->sel_count);
     a->gate_sum    = calloc(le, sizeof *a->gate_sum);
+    a->reap_count  = calloc(le, sizeof *a->reap_count);
+    a->reap_sum    = calloc(le, sizeof *a->reap_sum);
+    a->norm_sum    = calloc(le, sizeof *a->norm_sum);
     a->tok_probs   = calloc(n_layers, sizeof *a->tok_probs);
     a->tok_sel     = calloc(n_layers, sizeof *a->tok_sel);
     a->entropy_sum = calloc(n_layers, sizeof *a->entropy_sum);
-    int ok = a->sel_count && a->gate_sum && a->tok_probs && a->tok_sel &&
-             a->entropy_sum;
+    int ok = a->sel_count && a->gate_sum && a->reap_count && a->reap_sum &&
+             a->norm_sum && a->tok_probs && a->tok_sel && a->entropy_sum;
     for (int i = 0; i < POE_ACCUM_NMASS; i++) {
         a->mass_k_sum[i] = calloc(n_layers, sizeof *a->mass_k_sum[i]);
         ok = ok && a->mass_k_sum[i];
@@ -34,6 +37,9 @@ int poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,
 void poe_accum_free(poe_accum *a) {
     free(a->sel_count);
     free(a->gate_sum);
+    free(a->reap_count);
+    free(a->reap_sum);
+    free(a->norm_sum);
     free(a->tok_probs);
     free(a->tok_sel);
     free(a->entropy_sum);
@@ -121,7 +127,39 @@ void poe_accum_observe_selection(poe_accum *a, uint32_t layer, uint32_t T,
     }
 }
 
+void poe_accum_observe_reap(poe_accum *a, uint32_t layer, uint32_t T,
+                            const int32_t *ids, const float *weights,
+                            const float *norms, uint64_t *bad_ids) {
+    if (layer >= a->n_layers) return;
+    const uint32_t K = a->top_k, E = a->n_experts;
+    uint64_t *cnt = a->reap_count + (size_t)layer * E;
+    double   *rsm = a->reap_sum   + (size_t)layer * E;
+    double   *nsm = a->norm_sum   + (size_t)layer * E;
+
+    for (uint32_t t = 0; t < T; t++) {
+        for (uint32_t s = 0; s < K; s++) {
+            size_t  i = s + (size_t)t * K;
+            int32_t e = ids[i];
+            if (e < 0 || (uint32_t)e >= E) {
+                if (bad_ids) (*bad_ids)++;
+                continue;
+            }
+            cnt[e]++;
+            nsm[e] += (double)norms[i];
+            rsm[e] += (double)weights[i] * (double)norms[i];
+        }
+    }
+}
+
+static int accum_has_reap(const poe_accum *a) {
+    size_t le = (size_t)a->n_layers * a->n_experts;
+    for (size_t i = 0; i < le; i++)
+        if (a->reap_count[i]) return 1;
+    return 0;
+}
+
 void poe_accum_write_json(const poe_accum *a, FILE *f, const char *indent) {
+    const int reap = accum_has_reap(a);
     fprintf(f, "%s[\n", indent);
     for (uint32_t l = 0; l < a->n_layers; l++) {
         const uint64_t tp = a->tok_probs[l], ts = a->tok_sel[l];
@@ -148,7 +186,24 @@ void poe_accum_write_json(const poe_accum *a, FILE *f, const char *indent) {
             fprintf(f, "%s%.6f", e ? "," : "",
                     c ? a->gate_sum[(size_t)l * a->n_experts + e] / (double)c : 0.0);
         }
-        fprintf(f, "]}%s\n", l + 1 < a->n_layers ? "," : "");
+        fprintf(f, "]%s", reap ? ",\n" : "}");
+        if (reap) {
+            fprintf(f, "%s   \"reap_mean\": [", indent);
+            for (uint32_t e = 0; e < a->n_experts; e++) {
+                uint64_t c = a->reap_count[(size_t)l * a->n_experts + e];
+                fprintf(f, "%s%.6f", e ? "," : "",
+                        c ? a->reap_sum[(size_t)l * a->n_experts + e] / (double)c : 0.0);
+            }
+            fprintf(f, "],\n");
+            fprintf(f, "%s   \"actnorm_mean\": [", indent);
+            for (uint32_t e = 0; e < a->n_experts; e++) {
+                uint64_t c = a->reap_count[(size_t)l * a->n_experts + e];
+                fprintf(f, "%s%.6f", e ? "," : "",
+                        c ? a->norm_sum[(size_t)l * a->n_experts + e] / (double)c : 0.0);
+            }
+            fprintf(f, "]}");
+        }
+        fprintf(f, "%s\n", l + 1 < a->n_layers ? "," : "");
     }
     fprintf(f, "%s]", indent);
 }

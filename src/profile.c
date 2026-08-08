@@ -21,6 +21,8 @@ void poe_profile_free(poe_profile *p) {
     for (int i = 0; i < POE_PROFILE_NMASS; i++) free(p->mass_k[i]);
     free(p->sel_count);
     free(p->gate_mean);
+    free(p->reap_mean);
+    free(p->actnorm_mean);
     free(p);
 }
 
@@ -119,6 +121,26 @@ int poe_profile_load(poe_profile **out, const char *path,
             p->gate_mean[(size_t)li * p->n_experts + e] =
                 poe_json_num(poe_json_at(gm, e), 0.0);
         }
+
+        /* optional REAP arrays (allocate lazily on first sight) */
+        const poe_json *rm = poe_json_get(lj, "reap_mean");
+        const poe_json *am = poe_json_get(lj, "actnorm_mean");
+        if (poe_json_len(rm) == p->n_experts) {
+            if (p->reap_mean == NULL)
+                p->reap_mean = calloc(LE, sizeof *p->reap_mean);
+            if (p->actnorm_mean == NULL)
+                p->actnorm_mean = calloc(LE, sizeof *p->actnorm_mean);
+            if (p->reap_mean == NULL || p->actnorm_mean == NULL) {
+                poe_json_free(j); poe_profile_free(p);
+                return fail(err, errsz, "out of memory");
+            }
+            for (uint32_t e = 0; e < p->n_experts; e++) {
+                p->reap_mean[(size_t)li * p->n_experts + e] =
+                    poe_json_num(poe_json_at(rm, e), 0.0);
+                p->actnorm_mean[(size_t)li * p->n_experts + e] =
+                    poe_json_num(poe_json_at(am, e), 0.0);
+            }
+        }
     }
 
     poe_json_free(j);
@@ -134,6 +156,29 @@ static int cmp_desc_u64(const void *x, const void *y) {
     const sort_ent *a = x, *b = y;
     if (a->v != b->v) return a->v < b->v ? 1 : -1;
     return a->idx < b->idx ? -1 : 1;          /* deterministic tie order */
+}
+
+typedef struct { double v; uint32_t idx; } sort_entd;
+
+static int cmp_desc_d(const void *x, const void *y) {
+    const sort_entd *a = x, *b = y;
+    if (a->v != b->v) return a->v < b->v ? 1 : -1;
+    return a->idx < b->idx ? -1 : 1;
+}
+
+/* average-rank assignment for Spearman over doubles */
+static void avg_ranks_d(const double *vals, uint32_t n, sort_entd *tmp,
+                        double *ranks) {
+    for (uint32_t i = 0; i < n; i++) { tmp[i].v = vals[i]; tmp[i].idx = i; }
+    qsort(tmp, n, sizeof *tmp, cmp_desc_d);
+    uint32_t i = 0;
+    while (i < n) {
+        uint32_t jx = i;
+        while (jx + 1 < n && tmp[jx + 1].v == tmp[i].v) jx++;
+        double r = ((double)i + (double)jx) / 2.0;
+        for (uint32_t k2 = i; k2 <= jx; k2++) ranks[tmp[k2].idx] = r;
+        i = jx + 1;
+    }
 }
 
 /* average-rank assignment for Spearman */
@@ -247,6 +292,40 @@ int poe_profile_compare(const poe_profile *a, const poe_profile *b,
     out->wjaccard_mean = wjac_sum / L;
     out->spearman_mean = sp_sum / L;
     out->jsd_bits_mean = jsd_sum / L;
+
+    /* REAP agreement: rank correlation of saliency and — what pruning
+     * actually consumes — agreement of the bottom-X% prune sets. */
+    if (a->reap_mean && b->reap_mean) {
+        sort_entd *td = malloc(E * sizeof *td);
+        if (td) {
+            out->has_reap = 1;
+            double rsp = 0, rjac = 0;
+            for (uint32_t l = 0; l < L; l++) {
+                const double *sa = a->reap_mean + (size_t)l * E;
+                const double *sb = b->reap_mean + (size_t)l * E;
+                avg_ranks_d(sa, E, td, ra);
+                avg_ranks_d(sb, E, td, rb);
+                rsp += pearson(ra, rb, E);
+
+                memset(ina, 0, E); memset(inb, 0, E);
+                for (uint32_t i = 0; i < E; i++) { td[i].v = sa[i]; td[i].idx = i; }
+                qsort(td, E, sizeof *td, cmp_desc_d);
+                for (uint32_t i = 0; i < topn; i++) ina[td[E - 1 - i].idx] = 1;
+                for (uint32_t i = 0; i < E; i++) { td[i].v = sb[i]; td[i].idx = i; }
+                qsort(td, E, sizeof *td, cmp_desc_d);
+                for (uint32_t i = 0; i < topn; i++) inb[td[E - 1 - i].idx] = 1;
+                uint32_t inter = 0, uni = 0;
+                for (uint32_t e = 0; e < E; e++) {
+                    if (ina[e] && inb[e]) inter++;
+                    if (ina[e] || inb[e]) uni++;
+                }
+                rjac += uni ? (double)inter / (double)uni : 1.0;
+            }
+            out->reap_spearman_mean = rsp / L;
+            out->reap_bottom_jaccard = rjac / L;
+            free(td);
+        }
+    }
 
     free(tmp); free(ra); free(rb); free(ina); free(inb);
     return 0;

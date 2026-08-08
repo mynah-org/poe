@@ -31,6 +31,11 @@ typedef struct {
     /* per layer × expert [n_layers * n_experts] */
     uint64_t *sel_count;
     double   *gate_mean;
+
+    /* REAP saliency arrays, present only when the profile was captured
+     * with --metric reap (NULL otherwise). */
+    double   *reap_mean;      /* mean gate · ‖expert_output‖₂ over routed  */
+    double   *actnorm_mean;   /* mean ‖expert_output‖₂ (unweighted)        */
 } poe_profile;
 
 int  poe_profile_load(poe_profile **out, const char *path,
@@ -53,6 +58,11 @@ typedef struct {
     uint64_t exclusive_a, exclusive_b;
     /* experts unselected in BOTH profiles, summed over layers             */
     uint64_t cold_both;
+
+    /* REAP agreement, only when BOTH profiles carry reap data             */
+    int      has_reap;
+    double   reap_spearman_mean;      /* rank agreement of saliency        */
+    double   reap_bottom_jaccard;     /* bottom-X% prune-set agreement     */
 } poe_profile_cmp;
 
 /* Compare two profiles of the same shape. `top_frac` selects the top-X%

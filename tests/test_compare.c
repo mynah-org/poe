@@ -46,14 +46,17 @@ static const char *PROFILE_FMT =
 "     \"entropy_bits_mean\": 1.000000,\n"
 "     \"mass_k_mean\": {\"0.80\": 2.0, \"0.90\": 2.0, \"0.95\": 2.0, \"0.99\": 2.0},\n"
 "     \"sel_count\": [%s],\n"
-"     \"gate_mean\": [0.5,0.5,0.0,0.0]}\n"
+"     \"gate_mean\": [0.5,0.5,0.0,0.0],\n"
+"     \"reap_mean\": [%s],\n"
+"     \"actnorm_mean\": [1.0,1.0,1.0,1.0]}\n"
 "  ]\n"
 "}\n";
 
-static int write_profile(const char *path, const char *l1_sel) {
+static int write_profile(const char *path, const char *l1_sel,
+                         const char *l1_reap) {
     FILE *f = fopen(path, "w");
     if (f == NULL) return -1;
-    fprintf(f, PROFILE_FMT, l1_sel);
+    fprintf(f, PROFILE_FMT, l1_sel, l1_reap);
     fclose(f);
     return 0;
 }
@@ -84,8 +87,14 @@ int main(void) {
 
     /* ── profile load ───────────────────────────────────────────────────── */
     printf("profile load\n");
-    CHECK(write_profile("build/pa.poeprofile", "8,8,0,0") == 0, "write A");
-    CHECK(write_profile("build/pb.poeprofile", "0,0,8,8") == 0, "write B");
+    /* layer-1 REAP scores: A ranks 3>2>1>0 by value, B identical ->
+     * Spearman +1 on layer 1; layer 0 has no reap array (mixed profiles
+     * still compare, reap only when both carry it — here only layer 1
+     * carries it, which the loader treats as "profile has reap"). */
+    CHECK(write_profile("build/pa.poeprofile", "8,8,0,0", "0.1,0.2,0.3,0.4") == 0,
+          "write A");
+    CHECK(write_profile("build/pb.poeprofile", "0,0,8,8", "0.1,0.2,0.3,0.4") == 0,
+          "write B");
 
     poe_profile *a, *b;
     CHECK(poe_profile_load(&a, "build/pa.poeprofile", err, sizeof err) == 0,
@@ -115,6 +124,15 @@ int main(void) {
     CHECK(c.exclusive_a == 2 && c.exclusive_b == 2,
           "2 exclusive experts each (layer 1)");
     CHECK(c.cold_both == 1, "1 slot cold in both (layer 0, expert 1)");
+    CHECK(a->reap_mean != NULL && feq(a->reap_mean[4 + 3], 0.4),
+          "reap array parsed");
+    CHECK(c.has_reap == 1, "reap comparison available");
+    /* layer 0 reap is all zeros (ties -> spearman 0), layer 1 identical
+     * ranking -> +1; mean 0.5. Bottom sets: layer 0 all-tied -> same
+     * deterministic pick -> 1.0; layer 1 identical -> 1.0. */
+    CHECK(feq(c.reap_spearman_mean, 0.5), "reap Spearman 0.5 (%f)",
+          c.reap_spearman_mean);
+    CHECK(feq(c.reap_bottom_jaccard, 1.0), "reap bottom-set Jaccard 1.0");
 
     /* identity comparison */
     CHECK(poe_profile_compare(a, a, 0.5, &c, NULL) == 0, "self-compare");

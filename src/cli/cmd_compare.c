@@ -42,6 +42,11 @@ static void pair_detail(char ta, char tb, const poe_profile_cmp *c,
            (unsigned long long)c->exclusive_b, tb);
     printf("  cold in both        %llu expert slots of %u layers\n",
            (unsigned long long)c->cold_both, n_layers);
+    if (c->has_reap) {
+        printf("  REAP saliency       Spearman %.3f   bottom-set Jaccard %.3f "
+               "(prune-set agreement)\n",
+               c->reap_spearman_mean, c->reap_bottom_jaccard);
+    }
 }
 
 int poe_cmd_compare(int argc, char **argv) {
@@ -117,12 +122,17 @@ int poe_cmd_compare(int argc, char **argv) {
                    "     \"weighted_jaccard\": %.6f, \"spearman\": %.6f, "
                    "\"jsd_bits\": %.6f,\n"
                    "     \"exclusive_a\": %" PRIu64 ", \"exclusive_b\": %" PRIu64
-                   ", \"cold_both\": %" PRIu64 "}",
+                   ", \"cold_both\": %" PRIu64,
                    first ? "" : ",\n", ea, eb,
                    c.jaccard_mean, c.jaccard_min, c.jaccard_min_layer,
                    c.jaccard_max, c.jaccard_max_layer,
                    c.wjaccard_mean, c.spearman_mean, c.jsd_bits_mean,
                    c.exclusive_a, c.exclusive_b, c.cold_both);
+            if (c.has_reap)
+                printf(",\n     \"reap_spearman\": %.6f, "
+                       "\"reap_bottom_jaccard\": %.6f",
+                       c.reap_spearman_mean, c.reap_bottom_jaccard);
+            printf("}");
             first = 0;
         }
         printf("\n  ]\n}\n");

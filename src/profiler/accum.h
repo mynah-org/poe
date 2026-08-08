@@ -29,6 +29,17 @@ typedef struct {
     uint64_t *sel_count;      /* how often the expert was in the applied top-k */
     double   *gate_sum;       /* sum of applied (renormalized) gate weights    */
 
+    /* REAP saliency (milestone M4), same indexing. Only fed when expert
+     * outputs are captured (--metric reap):
+     *   reap_sum  = Σ over routed tokens of gate · ‖expert_output‖₂
+     *   norm_sum  = Σ over routed tokens of      ‖expert_output‖₂
+     * REAP score = reap_sum / reap_count (mean over routed tokens, as in
+     * the reference); norm_sum/reap_count is the unweighted activation-norm
+     * baseline metric. */
+    uint64_t *reap_count;
+    double   *reap_sum;
+    double   *norm_sum;
+
     /* per layer */
     uint64_t *tok_probs;      /* tokens whose full distribution was observed   */
     uint64_t *tok_sel;        /* tokens whose selection was observed           */
@@ -56,8 +67,16 @@ void poe_accum_observe_selection(poe_accum *a, uint32_t layer, uint32_t T,
                                  const int32_t *ids, const float *weights,
                                  uint64_t *bad_ids);
 
+/* Observe expert-output norms for REAP saliency. `ids` and `weights` as in
+ * observe_selection; `norms` holds the matching ‖expert_output‖₂ per slot,
+ * all [top_k × T]. Out-of-range ids are skipped (counted in *bad_ids). */
+void poe_accum_observe_reap(poe_accum *a, uint32_t layer, uint32_t T,
+                            const int32_t *ids, const float *weights,
+                            const float *norms, uint64_t *bad_ids);
+
 /* Write the accumulated statistics as the per-layer body of a profile:
- * a JSON array (one object per layer). Caller wraps it in the envelope. */
+ * a JSON array (one object per layer). Caller wraps it in the envelope.
+ * REAP arrays are emitted only when reap observations exist. */
 void poe_accum_write_json(const poe_accum *a, FILE *f, const char *indent);
 
 #endif

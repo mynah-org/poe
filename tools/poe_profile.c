@@ -35,7 +35,11 @@ typedef struct {
     poe_accum acc;
     uint32_t  n_layers, n_experts, top_k;
     int       probs_are_logits;      /* delayed-softmax arch (gpt-oss)      */
+    int       capture_down;          /* --metric reap: expert-output norms  */
+    const char *down_kind;           /* "down" or "down_biased" (gpt-oss)   */
     uint64_t  bad_ids;
+    uint64_t  reap_skipped;          /* down seen without staged selection  */
+    float    *norms;                 /* [top_k * batch] scratch             */
 
     /* per-layer staging for the current decode: ids and best weights.
      * probs are consumed immediately (entropy/mass need nothing else). */
@@ -134,9 +138,10 @@ static bool moe_cb(struct ggml_tensor *t, bool ask, void *ud) {
 
     int is_probs = strcmp(kind, "probs") == 0;
     int is_topk  = strcmp(kind, "topk") == 0;
+    int is_down  = ob->capture_down && strcmp(kind, ob->down_kind) == 0;
     int wprio    = weights_prio(kind);
 
-    if (ask) return is_probs || is_topk || wprio > 0;
+    if (ask) return is_probs || is_topk || is_down || wprio > 0;
 
     ob->tensors_seen++;
 
@@ -147,6 +152,34 @@ static bool moe_cb(struct ggml_tensor *t, bool ask, void *ud) {
         if (buf && fetch_2d(ob, t, buf, sizeof(float)) == 0)
             poe_accum_observe_probs(&ob->acc, layer, T, buf,
                                     ob->probs_are_logits);
+        return true;
+    }
+
+    if (is_down) {
+        /* [n_embd × top_k × T], contiguous product of the expert matmul.
+         * The router tensors for this layer precede it in the graph, so
+         * the staged selection is already present. */
+        uint32_t ne0 = (uint32_t)t->ne[0];
+        uint32_t k   = (uint32_t)t->ne[1];
+        uint32_t T   = (uint32_t)t->ne[2];
+        if (k != ob->top_k || T > ob->batch_cap ||
+            ob->stage_T[layer] != T || ob->wts_prio[layer] == 0) {
+            ob->reap_skipped++;
+            return true;
+        }
+        float *buf = scratch_for(ob, (size_t)ne0 * k * T * sizeof(float));
+        if (buf == NULL) { ob->reap_skipped++; return true; }
+        ggml_backend_tensor_get(t, buf, 0, (size_t)ne0 * k * T * sizeof(float));
+        for (size_t i = 0; i < (size_t)k * T; i++) {
+            const float *v = buf + i * ne0;
+            double s = 0.0;
+            for (uint32_t d = 0; d < ne0; d++) s += (double)v[d] * (double)v[d];
+            ob->norms[i] = (float)sqrt(s);
+        }
+        poe_accum_observe_reap(&ob->acc, layer, T,
+                               ob->ids + (size_t)layer * ob->top_k * ob->batch_cap,
+                               ob->wts + (size_t)layer * ob->top_k * ob->batch_cap,
+                               ob->norms, &ob->bad_ids);
         return true;
     }
 
@@ -247,17 +280,23 @@ static uint64_t fnv1a64(const void *data, size_t n) {
 static void usage(void) {
     fprintf(stderr,
         "usage: poe-profile <model.gguf> --dataset <file.txt|file.jsonl>\n"
-        "                   [-o out.poeprofile] [--max-tokens N] [--batch N]\n"
-        "                   [--ngl N] [--threads N]\n");
+        "                   [--metric routing|reap] [-o out.poeprofile]\n"
+        "                   [--max-tokens N] [--batch N] [--ngl N] [--threads N]\n"
+        "\n"
+        "  --metric routing   selection counts, gate stats, entropy, mass-K (cheap)\n"
+        "  --metric reap      the above plus expert-output norms for REAP saliency\n"
+        "                     (captures ffn_moe_down: slower, ~n_embd*k*4 B/token/layer)\n");
 }
 
 int main(int argc, char **argv) {
     const char *model_path = NULL, *dataset_path = NULL, *out_path = NULL;
+    const char *metric = "routing";
     long max_tokens = 8192, n_batch = 2048, ngl = 999, n_threads = 0;
 
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_path = argv[++i];
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)        out_path = argv[++i];
+        else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc)  metric = argv[++i];
         else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) max_tokens = atol(argv[++i]);
         else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc)   n_batch = atol(argv[++i]);
         else if (strcmp(argv[i], "--ngl") == 0 && i + 1 < argc)     ngl = atol(argv[++i]);
@@ -266,6 +305,11 @@ int main(int argc, char **argv) {
         else { usage(); return 2; }
     }
     if (model_path == NULL || dataset_path == NULL) { usage(); return 2; }
+    if (strcmp(metric, "routing") != 0 && strcmp(metric, "gate") != 0 &&
+        strcmp(metric, "reap") != 0) {
+        fprintf(stderr, "poe-profile: unknown metric '%s'\n", metric);
+        return 2;
+    }
 
     /* Static discovery through ingot first: layer/expert topology and the
      * model fingerprint the profile gets bound to. */
@@ -286,6 +330,9 @@ int main(int argc, char **argv) {
     ob.n_experts = pm->expert_count;
     ob.top_k     = pm->experts_per_token;
     ob.probs_are_logits = strcmp(pm->arch, "gpt-oss") == 0;
+    ob.capture_down = strcmp(metric, "reap") == 0;
+    /* gpt-oss experts carry biases: the applied output is the biased one */
+    ob.down_kind = ob.probs_are_logits ? "down_biased" : "down";
     ob.batch_cap = (uint32_t)n_batch;
     if (poe_accum_init(&ob.acc, ob.n_layers, ob.n_experts, ob.top_k) != 0) {
         fprintf(stderr, "poe-profile: out of memory\n");
@@ -295,7 +342,8 @@ int main(int argc, char **argv) {
     ob.wts      = malloc((size_t)ob.n_layers * ob.top_k * ob.batch_cap * sizeof *ob.wts);
     ob.wts_prio = calloc(ob.n_layers, sizeof *ob.wts_prio);
     ob.stage_T  = calloc(ob.n_layers, sizeof *ob.stage_T);
-    if (!ob.ids || !ob.wts || !ob.wts_prio || !ob.stage_T) {
+    ob.norms    = malloc((size_t)ob.top_k * ob.batch_cap * sizeof *ob.norms);
+    if (!ob.ids || !ob.wts || !ob.wts_prio || !ob.stage_T || !ob.norms) {
         fprintf(stderr, "poe-profile: out of memory\n");
         return 1;
     }
@@ -360,9 +408,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "\r  %d/%d tokens", done, n_toks);
     }
     long elapsed = (long)(time(NULL) - t0);
-    fprintf(stderr, "\n  %lds, %llu moe tensors observed, %llu bad expert ids\n",
+    fprintf(stderr, "\n  %lds, %llu moe tensors observed, %llu bad expert ids",
             elapsed, (unsigned long long)ob.tensors_seen,
             (unsigned long long)ob.bad_ids);
+    if (ob.capture_down)
+        fprintf(stderr, ", %llu reap captures skipped",
+                (unsigned long long)ob.reap_skipped);
+    fprintf(stderr, "\n");
 
     if (ob.tensors_seen == 0) {
         fprintf(stderr, "poe-profile: no ffn_moe_* tensors observed — "
@@ -391,7 +443,8 @@ int main(int argc, char **argv) {
             (unsigned long long)ds_hash);
     fprintf(f, "  \"dataset_bytes\": %zu,\n", ds_len);
     fprintf(f, "  \"tokens\": %d,\n", n_toks);
-    fprintf(f, "  \"metrics\": [\"routing\", \"gate\"],\n");
+    fprintf(f, "  \"metrics\": [\"routing\", \"gate\"%s],\n",
+            ob.capture_down ? ", \"reap\"" : "");
     fprintf(f, "  \"wall_seconds\": %ld,\n", elapsed);
     fprintf(f, "  \"layers\":\n");
     poe_accum_write_json(&ob.acc, f, "  ");

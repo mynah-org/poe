@@ -23,8 +23,8 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe inspect` | ✅ static MoE structure, storage accounting, theoretical reductions |
 | `poe experts` | ✅ expert tensor mapping and sizes |
 | `poe routing-budget` | ✅ exact active-parameter accounting per routed-K |
-| `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K, streamed into a `.poeprofile` |
-| `poe compare` | ✅ expert-fingerprint overlap between workload profiles: Jaccard / weighted Jaccard / Spearman / JS divergence, exclusive and cold experts |
+| `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K; `--metric reap` adds streaming REAP saliency (gate × expert-output norm) |
+| `poe compare` | ✅ expert-fingerprint overlap between workload profiles: Jaccard / weighted Jaccard / Spearman / JS divergence, exclusive and cold experts, REAP prune-set agreement |
 | `poe profile` / `plan` / `estimate` / `apply` / `forge` / `diff` / `validate` | planned — see [vision.md](vision.md) |
 
 ## Build
