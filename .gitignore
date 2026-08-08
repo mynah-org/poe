@@ -1,0 +1,18 @@
+# build artifacts
+*.o
+*.d
+/poe
+build/
+
+# models and generated artifacts
+*.gguf
+*.safetensors
+*.poeprofile
+*.poeplan
+
+# local notes / exports (working files, not part of the public repo)
+*.pdf
+/CLAUDE.md
+/plan.md
+
+.DS_Store
