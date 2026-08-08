@@ -9,7 +9,7 @@ WARN     = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wvla
 INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
-LIB_SRC  = src/model.c src/fmt.c
+LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c
 INGOT    = third_party/ingot/ingot.c
@@ -36,8 +36,9 @@ build:
 	mkdir -p build
 
 ## test: synthetic-fixture tests + a CLI smoke run (no model downloads)
-test: build/test_model poe | build
+test: build/test_model build/test_accum poe | build
 	./build/test_model
+	./build/test_accum
 	@echo "── poe inspect (smoke) ──"
 	./poe inspect build/fixture-moe.gguf
 	./poe inspect build/fixture-moe.gguf --json > /dev/null
@@ -49,6 +50,24 @@ test: build/test_model poe | build
 build/test_model: tests/test_model.o tests/fixture.o src/model.o src/fmt.o \
                   third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
+build/test_accum: tests/test_accum.o src/profiler/accum.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
+## profiler: build/poe-profile — MoE router profiler over llama.cpp (M2).
+## Needs a llama.cpp checkout built with shared libs:
+##   make profiler LLAMA_DIR=~/llama.cpp
+LLAMA_DIR ?= ../llama.cpp
+LLAMA_INC  = -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
+LLAMA_LIB  = -L$(LLAMA_DIR)/build/bin -lllama -lggml -lggml-base \
+             -Wl,-rpath,$(LLAMA_DIR)/build/bin
+
+profiler: build/poe-profile
+build/poe-profile: tools/poe_profile.c src/profiler/accum.o src/model.o \
+                   src/fmt.o third_party/ingot/ingot.o | build
+	$(CC) $(WARN) $(CFLAGS) $(INCLUDE) $(LLAMA_INC) $< \
+	      src/profiler/accum.o src/model.o src/fmt.o third_party/ingot/ingot.o \
+	      $(LLAMA_LIB) $(LDLIBS) -o $@
 
 ## tools: build/poe-mkfixture (synthetic GGUF generator)
 tools: build/poe-mkfixture

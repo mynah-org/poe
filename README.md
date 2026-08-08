@@ -23,6 +23,7 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe inspect` | ✅ static MoE structure, storage accounting, theoretical reductions |
 | `poe experts` | ✅ expert tensor mapping and sizes |
 | `poe routing-budget` | ✅ exact active-parameter accounting per routed-K |
+| `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K, streamed into a `.poeprofile` |
 | `poe profile` / `compare` / `plan` / `estimate` / `apply` / `forge` / `diff` / `validate` | planned — see [vision.md](vision.md) |
 
 ## Build
@@ -33,6 +34,7 @@ amalgam is vendored in `third_party/ingot/`.
 ```sh
 make          # builds ./poe
 make test     # synthetic-fixture tests, no model downloads
+make profiler LLAMA_DIR=~/llama.cpp   # optional: poe-profile (needs llama.cpp built with shared libs)
 ```
 
 ## Usage
