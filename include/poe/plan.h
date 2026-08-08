@@ -2,8 +2,7 @@
  *
  * A plan binds a source model (by fingerprint) and one or more profiles to
  * an explicit per-layer keep/prune decision plus exact byte accounting.
- * Building a plan never touches the checkpoint; `poe apply` (M7) consumes
- * it. Reproducibility invariant: same model + same profiles + same
+ * Building a plan never touches the checkpoint; `poe apply` consumes it. Reproducibility invariant: same model + same profiles + same
  * parameters + same POE version -> byte-identical plan file.
  *
  * SPDX-License-Identifier: MIT */

@@ -27,12 +27,15 @@ static const char USAGE[] =
 "  estimate        <plan.poeplan> [model.gguf]       plan accounting (+ verification)\n"
 "  diff            <a> <b>                           diff plans, profiles, or models\n"
 "\n"
+"checkpoint rewriting\n"
+"  apply           <plan.poeplan> <model.gguf>       structural expert pruning: slice\n"
+"                  -o <out.gguf> [--force]           experts, compact router, verify\n"
+"\n"
 "profiling (needs an inference backend)\n"
 "  profile   use the standalone poe-profile tool for now:\n"
 "            make profiler LLAMA_DIR=<llama.cpp>  ->  build/poe-profile\n"
 "\n"
 "planned\n"
-"  apply     rewrite the checkpoint according to a plan         (M7)\n"
 "  forge     profile + plan + apply in one command              (M8)\n"
 "  validate  structural / smoke / behavioral checks             (M7+)\n"
 "\n"
@@ -68,13 +71,13 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "plan")     == 0) return poe_cmd_plan(sub_argc, sub_argv);
     if (strcmp(cmd, "estimate") == 0) return poe_cmd_estimate(sub_argc, sub_argv);
     if (strcmp(cmd, "diff")     == 0) return poe_cmd_diff(sub_argc, sub_argv);
+    if (strcmp(cmd, "apply")    == 0) return poe_cmd_apply(sub_argc, sub_argv);
 
     if (strcmp(cmd, "profile")  == 0) {
         fprintf(stderr, "poe profile: use the standalone poe-profile tool "
                         "(make profiler LLAMA_DIR=<llama.cpp checkout>)\n");
         return 2;
     }
-    if (strcmp(cmd, "apply")    == 0) return stub(cmd, "milestone M7");
     if (strcmp(cmd, "forge")    == 0) return stub(cmd, "milestone M8");
     if (strcmp(cmd, "validate") == 0) return stub(cmd, "milestone M7+");
 

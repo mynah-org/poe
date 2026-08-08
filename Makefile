@@ -10,10 +10,10 @@ INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
 LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
-           src/json.c src/profile.c src/plan.c
+           src/json.c src/profile.c src/plan.c src/apply.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c src/cli/cmd_plan.c \
-           src/cli/cmd_estimate.c src/cli/cmd_diff.c
+           src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c
 INGOT    = third_party/ingot/ingot.c
 
 SRC      = $(LIB_SRC) $(CLI_SRC) $(INGOT)
@@ -38,11 +38,13 @@ build:
 	mkdir -p build
 
 ## test: synthetic-fixture tests + a CLI smoke run (no model downloads)
-test: build/test_model build/test_accum build/test_compare build/test_plan poe | build
+test: build/test_model build/test_accum build/test_compare build/test_plan \
+      build/test_apply poe | build
 	./build/test_model
 	./build/test_accum
 	./build/test_compare
 	./build/test_plan
+	./build/test_apply
 	@echo "── poe inspect (smoke) ──"
 	./poe inspect build/fixture-moe.gguf
 	./poe inspect build/fixture-moe.gguf --json > /dev/null
@@ -54,6 +56,8 @@ test: build/test_model build/test_accum build/test_compare build/test_plan poe |
 	./poe compare build/pa.poeprofile build/pb.poeprofile --json > /dev/null
 	./poe plan build/plan-fix.gguf --profile build/plan.poeprofile --method reap --prune 25% -o build/smoke.poeplan
 	./poe estimate build/smoke.poeplan build/plan-fix.gguf
+	./poe apply build/smoke.poeplan build/plan-fix.gguf -o build/smoke-pruned.gguf
+	./poe inspect build/smoke-pruned.gguf
 	./poe plan build/plan-fix.gguf --profile build/plan.poeprofile --method frequency --prune 50% -o build/smoke50.poeplan > /dev/null
 	./poe diff build/smoke.poeplan build/smoke50.poeplan
 	./poe diff build/pa.poeprofile build/pb.poeprofile
@@ -71,6 +75,11 @@ build/test_compare: tests/test_compare.o src/json.o src/profile.o | build
 
 build/test_plan: tests/test_plan.o tests/fixture.o src/plan.o src/profile.o \
                  src/json.o src/model.o src/fmt.o third_party/ingot/ingot.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
+build/test_apply: tests/test_apply.o tests/fixture.o src/apply.o src/plan.o \
+                  src/profile.o src/json.o src/model.o src/fmt.o \
+                  third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 ## profiler: build/poe-profile — MoE router profiler over llama.cpp (M2).

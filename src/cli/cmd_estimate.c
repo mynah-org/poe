@@ -84,7 +84,8 @@ int poe_cmd_estimate(int argc, char **argv) {
                 uint64_t pruned = 0;
                 for (uint32_t e = 0; e < E; e++)
                     if (!p->keep[(size_t)l * E + e]) pruned++;
-                uint64_t row_b = blk->router_w ? blk->router_w->nbytes / E : 0;
+                uint64_t row_b = (blk->router_w ? blk->router_w->nbytes / E : 0) +
+                                 (blk->router_b ? blk->router_b->nbytes / E : 0);
                 removed += pruned * (blk->expert_bytes / E + row_b);
             }
             if (removed == p->bytes_removed)

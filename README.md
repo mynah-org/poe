@@ -28,7 +28,8 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe plan` | ✅ deterministic expert-removal plans from weighted profiles (`reap` / `frequency` / `gate`), exact byte accounting, conservative guards ([format](docs/poeplan.md)) |
 | `poe estimate` | ✅ plan accounting + fingerprint/byte verification against the source model |
 | `poe diff` | ✅ plans (prune-set agreement), profiles, and structural model diffs |
-| `poe apply` / `forge` / `validate` | planned — see [vision.md](vision.md) |
+| `poe apply` | ✅ structural GGUF pruning: slices packed expert tensors along the expert dimension, compacts router rows in keep order, patches `expert_count`, preserves all other metadata byte-for-byte; streams mmap → output, then reopens and verifies exact accounting |
+| `poe forge` / `validate` | planned — see [vision.md](vision.md) |
 
 ## Build
 
@@ -63,8 +64,13 @@ poe routing-budget model.gguf         # ActiveParams(K) table, exact, per routed
 poe inspect model.gguf --json         # machine-readable output
 ```
 
+```sh
+# materialize a plan: 17.3 GiB -> 13.2 GiB, no training, exact bytes
+poe apply coding-reap25.poeplan model.gguf -o model-pruned.gguf
+```
+
 Static commands (`inspect`, `experts`, `routing-budget`, `estimate`, `plan`,
-`diff`) never run inference and never require a GPU.
+`diff`, `apply`) never run inference and never require a GPU.
 
 ## Design
 

@@ -169,8 +169,10 @@ int poe_plan_build(poe_plan **out, const poe_model *m,
         }
         if (blk->expert_bytes % E || blk->expert_params % E)
             warn(p, "expert tensor bytes are not divisible per expert — accounting rounded down");
-        uint64_t row_b = blk->router_w ? blk->router_w->nbytes / E : 0;
-        uint64_t row_p = blk->router_w ? blk->router_w->nelem  / E : 0;
+        uint64_t row_b = (blk->router_w ? blk->router_w->nbytes / E : 0) +
+                         (blk->router_b ? blk->router_b->nbytes / E : 0);
+        uint64_t row_p = (blk->router_w ? blk->router_w->nelem  / E : 0) +
+                         (blk->router_b ? blk->router_b->nelem  / E : 0);
         p->bytes_removed  += (uint64_t)prune_n * (blk->expert_bytes  / E + row_b);
         p->params_removed += (uint64_t)prune_n * (blk->expert_params / E + row_p);
     }

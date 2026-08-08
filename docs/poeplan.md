@@ -3,7 +3,7 @@
 A plan is a deterministic, persistent expert-removal decision: which experts
 survive in each MoE layer of a specific checkpoint, plus exact byte
 accounting. Plans are built by `poe plan` from one or more `.poeprofile`
-files and consumed by `poe apply` (M7). JSON, human-diffable.
+files and consumed by `poe apply`. JSON, human-diffable.
 
 Reproducibility invariant: same model + same profiles + same parameters +
 same POE version → byte-identical plan file.
