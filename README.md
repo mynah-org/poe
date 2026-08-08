@@ -25,7 +25,10 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe routing-budget` | ✅ exact active-parameter accounting per routed-K |
 | `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K; `--metric reap` adds streaming REAP saliency (gate × expert-output norm); `--until-stable` stops calibration when the prune decision converges |
 | `poe compare` | ✅ expert-fingerprint overlap between workload profiles: Jaccard / weighted Jaccard / Spearman / JS divergence, exclusive and cold experts, REAP prune-set agreement |
-| `poe profile` / `plan` / `estimate` / `apply` / `forge` / `diff` / `validate` | planned — see [vision.md](vision.md) |
+| `poe plan` | ✅ deterministic expert-removal plans from weighted profiles (`reap` / `frequency` / `gate`), exact byte accounting, conservative guards ([format](docs/poeplan.md)) |
+| `poe estimate` | ✅ plan accounting + fingerprint/byte verification against the source model |
+| `poe diff` | ✅ plans (prune-set agreement), profiles, and structural model diffs |
+| `poe apply` / `forge` / `validate` | planned — see [vision.md](vision.md) |
 
 ## Build
 

@@ -21,13 +21,17 @@ static const char USAGE[] =
 "  routing-budget  <model.gguf> [--json]             active params as a function of K\n"
 "  compare         <a.poeprofile> <b.poeprofile>...  expert-fingerprint overlap between\n"
 "                  [--top P] [--json]                workload profiles\n"
+"  plan            <model.gguf> --profile <p[:W]>... build a deterministic expert-removal\n"
+"                  [--method reap|frequency|gate]    plan with exact byte accounting\n"
+"                  [--prune P] [-o out.poeplan]\n"
+"  estimate        <plan.poeplan> [model.gguf]       plan accounting (+ verification)\n"
+"  diff            <a> <b>                           diff plans, profiles, or models\n"
 "\n"
-"planned (see plan.md for the milestone each belongs to)\n"
-"  profile   observe a workload, write a .poeprofile            (M2, M4, M5)\n"
-"  compare   compare workload profiles                          (M3)\n"
-"  plan      turn a profile + constraints into a .poeplan       (M6)\n"
-"  estimate  disk/RAM/VRAM effect of a plan                     (M6)\n"
-"  diff      diff models, profiles or plans                     (M6)\n"
+"profiling (needs an inference backend)\n"
+"  profile   use the standalone poe-profile tool for now:\n"
+"            make profiler LLAMA_DIR=<llama.cpp>  ->  build/poe-profile\n"
+"\n"
+"planned\n"
 "  apply     rewrite the checkpoint according to a plan         (M7)\n"
 "  forge     profile + plan + apply in one command              (M8)\n"
 "  validate  structural / smoke / behavioral checks             (M7+)\n"
@@ -61,11 +65,15 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "routing-budget") == 0)
         return poe_cmd_routing_budget(sub_argc, sub_argv);
     if (strcmp(cmd, "compare")  == 0) return poe_cmd_compare(sub_argc, sub_argv);
+    if (strcmp(cmd, "plan")     == 0) return poe_cmd_plan(sub_argc, sub_argv);
+    if (strcmp(cmd, "estimate") == 0) return poe_cmd_estimate(sub_argc, sub_argv);
+    if (strcmp(cmd, "diff")     == 0) return poe_cmd_diff(sub_argc, sub_argv);
 
-    if (strcmp(cmd, "profile")  == 0) return stub(cmd, "milestones M2/M4/M5");
-    if (strcmp(cmd, "plan")     == 0) return stub(cmd, "milestone M6");
-    if (strcmp(cmd, "estimate") == 0) return stub(cmd, "milestone M6");
-    if (strcmp(cmd, "diff")     == 0) return stub(cmd, "milestone M6");
+    if (strcmp(cmd, "profile")  == 0) {
+        fprintf(stderr, "poe profile: use the standalone poe-profile tool "
+                        "(make profiler LLAMA_DIR=<llama.cpp checkout>)\n");
+        return 2;
+    }
     if (strcmp(cmd, "apply")    == 0) return stub(cmd, "milestone M7");
     if (strcmp(cmd, "forge")    == 0) return stub(cmd, "milestone M8");
     if (strcmp(cmd, "validate") == 0) return stub(cmd, "milestone M7+");
