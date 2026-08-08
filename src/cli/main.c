@@ -34,23 +34,17 @@ static const char USAGE[] =
 "                  (--profile <p[:W]>... |           (profile) -> plan -> apply -> verify,\n"
 "                   --dataset <text>)                intermediate artifacts preserved\n"
 "                  [--method M] [--prune P]\n"
+"  validate        <model.gguf> [--plan <p>]         structural checks; with a plan,\n"
+"                                                    source/pruned provenance and exact\n"
+"                                                    byte accounting\n"
 "\n"
 "profiling (needs an inference backend)\n"
 "  profile   use the standalone poe-profile tool for now:\n"
 "            make profiler LLAMA_DIR=<llama.cpp>  ->  build/poe-profile\n"
 "\n"
-"planned\n"
-"  validate  structural / smoke / behavioral checks             (M8+)\n"
 "\n"
 "  --version print version and exit\n"
 "  --help    this text\n";
-
-static int stub(const char *cmd, const char *milestone) {
-    fprintf(stderr,
-            "poe %s: not implemented yet (planned for %s — see plan.md)\n",
-            cmd, milestone);
-    return 2;
-}
 
 int main(int argc, char **argv) {
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "help") == 0) {
@@ -76,13 +70,13 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "diff")     == 0) return poe_cmd_diff(sub_argc, sub_argv);
     if (strcmp(cmd, "apply")    == 0) return poe_cmd_apply(sub_argc, sub_argv);
     if (strcmp(cmd, "forge")    == 0) return poe_cmd_forge(sub_argc, sub_argv);
+    if (strcmp(cmd, "validate") == 0) return poe_cmd_validate(sub_argc, sub_argv);
 
     if (strcmp(cmd, "profile")  == 0) {
         fprintf(stderr, "poe profile: use the standalone poe-profile tool "
                         "(make profiler LLAMA_DIR=<llama.cpp checkout>)\n");
         return 2;
     }
-    if (strcmp(cmd, "validate") == 0) return stub(cmd, "milestone M8+");
 
     fprintf(stderr, "poe: unknown command '%s' (try poe --help)\n", cmd);
     return 2;
