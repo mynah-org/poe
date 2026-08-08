@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "../src/profiler/accum.h"
+#include "../src/profiler/stability.h"
 
 static int failures;
 static int checks;
@@ -83,6 +84,38 @@ int main(void) {
           "reap sums expert1/2");
     CHECK(feq(a.norm_sum[4 + 0], 6.0), "activation-norm sum expert0 = 6");
     CHECK(bad == 2, "reap left bad_ids untouched");
+
+    /* ── scores snapshot: reap wins over frequency when present ────────── */
+    {
+        double sc[8];
+        CHECK(poe_accum_scores(&a, sc) == 1, "scores use reap when present");
+        CHECK(feq(sc[4 + 0], 1.6), "score = reap mean (%f)", sc[4 + 0]);
+        poe_accum freq_only;
+        poe_accum_init(&freq_only, 1, 4, 2);
+        poe_accum_observe_selection(&freq_only, 0, 2, ids, wts, NULL);
+        double sf[4];
+        CHECK(poe_accum_scores(&freq_only, sf) == 0 && feq(sf[2], 2.0),
+              "scores fall back to selection counts");
+        poe_accum_free(&freq_only);
+    }
+
+    /* ── stability tracker ──────────────────────────────────────────────── */
+    {
+        poe_stability st;
+        poe_stability_step step;
+        CHECK(poe_stability_init(&st, 1, 4, 0.5) == 0, "stability init (bottom-2)");
+        double s1[4] = { 4, 3, 2, 1 };            /* bottom set {2,3} */
+        CHECK(poe_stability_update(&st, s1, &step) == -1, "first call has no prev");
+        double s2[4] = { 5, 4, 1, 2 };            /* bottom still {2,3} */
+        CHECK(poe_stability_update(&st, s2, &step) == 0, "second call compares");
+        CHECK(feq(step.bottom_jaccard, 1.0), "bottom set unchanged -> 1.0");
+        double s3[4] = { 1, 2, 5, 4 };            /* bottom now {0,1} */
+        poe_stability_update(&st, s3, &step);
+        CHECK(feq(step.bottom_jaccard, 0.0), "bottom set flipped -> 0.0");
+        CHECK(feq(step.spearman, -1.0), "full rank reversal -> spearman -1 (%f)",
+              step.spearman);
+        poe_stability_free(&st);
+    }
 
     /* ── JSON body is well-formed enough to be embedded ────────────────── */
     FILE *f = fopen("build/accum.json", "w");

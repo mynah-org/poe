@@ -9,7 +9,8 @@ WARN     = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wvla
 INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
-LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/json.c src/profile.c
+LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
+           src/json.c src/profile.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c
 INGOT    = third_party/ingot/ingot.c
@@ -54,7 +55,7 @@ build/test_model: tests/test_model.o tests/fixture.o src/model.o src/fmt.o \
                   third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
-build/test_accum: tests/test_accum.o src/profiler/accum.o | build
+build/test_accum: tests/test_accum.o src/profiler/accum.o src/profiler/stability.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 build/test_compare: tests/test_compare.o src/json.o src/profile.o | build
@@ -69,11 +70,12 @@ LLAMA_LIB  = -L$(LLAMA_DIR)/build/bin -lllama -lggml -lggml-base \
              -Wl,-rpath,$(LLAMA_DIR)/build/bin
 
 profiler: build/poe-profile
-build/poe-profile: tools/poe_profile.c src/profiler/accum.o src/model.o \
-                   src/fmt.o third_party/ingot/ingot.o | build
+build/poe-profile: tools/poe_profile.c src/profiler/accum.o \
+                   src/profiler/stability.o src/model.o src/fmt.o \
+                   third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $(INCLUDE) $(LLAMA_INC) $< \
-	      src/profiler/accum.o src/model.o src/fmt.o third_party/ingot/ingot.o \
-	      $(LLAMA_LIB) $(LDLIBS) -o $@
+	      src/profiler/accum.o src/profiler/stability.o src/model.o src/fmt.o \
+	      third_party/ingot/ingot.o $(LLAMA_LIB) $(LDLIBS) -o $@
 
 ## tools: build/poe-mkfixture (synthetic GGUF generator)
 tools: build/poe-mkfixture

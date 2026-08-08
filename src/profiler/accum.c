@@ -158,6 +158,19 @@ static int accum_has_reap(const poe_accum *a) {
     return 0;
 }
 
+int poe_accum_scores(const poe_accum *a, double *out) {
+    size_t le = (size_t)a->n_layers * a->n_experts;
+    int reap = accum_has_reap(a);
+    for (size_t i = 0; i < le; i++) {
+        if (reap)
+            out[i] = a->reap_count[i]
+                   ? a->reap_sum[i] / (double)a->reap_count[i] : 0.0;
+        else
+            out[i] = (double)a->sel_count[i];
+    }
+    return reap;
+}
+
 void poe_accum_write_json(const poe_accum *a, FILE *f, const char *indent) {
     const int reap = accum_has_reap(a);
     fprintf(f, "%s[\n", indent);

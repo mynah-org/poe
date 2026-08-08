@@ -28,6 +28,9 @@
 
 #include "poe/poe.h"
 #include "../src/profiler/accum.h"
+#include "../src/profiler/stability.h"
+
+#define MAX_WINDOWS 4096
 
 /* ── observer state, shared with the callback ───────────────────────────── */
 
@@ -282,16 +285,25 @@ static void usage(void) {
         "usage: poe-profile <model.gguf> --dataset <file.txt|file.jsonl>\n"
         "                   [--metric routing|reap] [-o out.poeprofile]\n"
         "                   [--max-tokens N] [--batch N] [--ngl N] [--threads N]\n"
+        "                   [--until-stable S] [--stable-windows K] [--bottom F]\n"
         "\n"
         "  --metric routing   selection counts, gate stats, entropy, mass-K (cheap)\n"
         "  --metric reap      the above plus expert-output norms for REAP saliency\n"
-        "                     (captures ffn_moe_down: slower, ~n_embd*k*4 B/token/layer)\n");
+        "                     (captures ffn_moe_down: slower, ~n_embd*k*4 B/token/layer)\n"
+        "\n"
+        "convergence (checked once per batch of --batch tokens):\n"
+        "  --until-stable S   stop early when the bottom-F prune set's Jaccard\n"
+        "                     between consecutive checks stays >= S (e.g. 0.99)\n"
+        "  --stable-windows K consecutive checks required (default 2)\n"
+        "  --bottom F         prune-decision fraction (default 0.25)\n");
 }
 
 int main(int argc, char **argv) {
     const char *model_path = NULL, *dataset_path = NULL, *out_path = NULL;
     const char *metric = "routing";
     long max_tokens = 8192, n_batch = 2048, ngl = 999, n_threads = 0;
+    double until_stable = 0.0, bottom_frac = 0.25;
+    long stable_windows = 2;
 
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_path = argv[++i];
@@ -301,8 +313,16 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc)   n_batch = atol(argv[++i]);
         else if (strcmp(argv[i], "--ngl") == 0 && i + 1 < argc)     ngl = atol(argv[++i]);
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) n_threads = atol(argv[++i]);
+        else if (strcmp(argv[i], "--until-stable") == 0 && i + 1 < argc) until_stable = atof(argv[++i]);
+        else if (strcmp(argv[i], "--stable-windows") == 0 && i + 1 < argc) stable_windows = atol(argv[++i]);
+        else if (strcmp(argv[i], "--bottom") == 0 && i + 1 < argc)  bottom_frac = atof(argv[++i]);
         else if (argv[i][0] != '-' && model_path == NULL)           model_path = argv[i];
         else { usage(); return 2; }
+    }
+    if (until_stable < 0.0 || until_stable > 1.0 ||
+        bottom_frac <= 0.0 || bottom_frac > 1.0 || stable_windows < 1) {
+        fprintf(stderr, "poe-profile: bad convergence parameters\n");
+        return 2;
     }
     if (model_path == NULL || dataset_path == NULL) { usage(); return 2; }
     if (strcmp(metric, "routing") != 0 && strcmp(metric, "gate") != 0 &&
@@ -392,6 +412,21 @@ int main(int argc, char **argv) {
     fprintf(stderr, "poe-profile: %d calibration tokens, batch %ld, %u layers x %u experts (top-%u)\n",
             n_toks, n_batch, ob.n_layers, ob.n_experts, ob.top_k);
 
+    /* convergence tracking: one check per batch */
+    poe_stability st;
+    if (poe_stability_init(&st, ob.n_layers, ob.n_experts, bottom_frac) != 0) {
+        fprintf(stderr, "poe-profile: out of memory\n");
+        return 1;
+    }
+    double *scores = malloc((size_t)ob.n_layers * ob.n_experts * sizeof *scores);
+    struct { int tokens; double jaccard, spearman; } hist[MAX_WINDOWS];
+    int n_hist = 0, stable_streak = 0, stopped_early = 0;
+
+    if (until_stable > 0.0)
+        fprintf(stderr, "  convergence: stop at bottom-%.0f%% Jaccard >= %.3f "
+                        "for %ld checks\n",
+                bottom_frac * 100.0, until_stable, stable_windows);
+
     /* prefill-style scoring in independent chunks */
     time_t t0 = time(NULL);
     int done = 0;
@@ -405,7 +440,31 @@ int main(int argc, char **argv) {
         flush_all(&ob);
         llama_memory_clear(llama_get_memory(ctx), true);
         done += n;
-        fprintf(stderr, "\r  %d/%d tokens", done, n_toks);
+
+        poe_accum_scores(&ob.acc, scores);
+        poe_stability_step step;
+        if (scores && poe_stability_update(&st, scores, &step) == 0) {
+            if (n_hist < MAX_WINDOWS) {
+                hist[n_hist].tokens   = done;
+                hist[n_hist].jaccard  = step.bottom_jaccard;
+                hist[n_hist].spearman = step.spearman;
+                n_hist++;
+            }
+            fprintf(stderr, "\r  %d/%d tokens   bottom-set stability %.3f   "
+                            "rank corr %.3f\n", done, n_toks,
+                    step.bottom_jaccard, step.spearman);
+            if (until_stable > 0.0) {
+                stable_streak = step.bottom_jaccard >= until_stable
+                              ? stable_streak + 1 : 0;
+                if (stable_streak >= stable_windows) {
+                    stopped_early = 1;
+                    fprintf(stderr, "  converged at %d tokens\n", done);
+                    break;
+                }
+            }
+        } else {
+            fprintf(stderr, "\r  %d/%d tokens", done, n_toks);
+        }
     }
     long elapsed = (long)(time(NULL) - t0);
     fprintf(stderr, "\n  %lds, %llu moe tensors observed, %llu bad expert ids",
@@ -445,6 +504,17 @@ int main(int argc, char **argv) {
     fprintf(f, "  \"tokens\": %d,\n", n_toks);
     fprintf(f, "  \"metrics\": [\"routing\", \"gate\"%s],\n",
             ob.capture_down ? ", \"reap\"" : "");
+    fprintf(f, "  \"tokens_scored\": %d,\n", done);
+    fprintf(f, "  \"convergence\": {\n");
+    fprintf(f, "    \"bottom_fraction\": %.4f,\n", bottom_frac);
+    fprintf(f, "    \"target\": %.4f,\n", until_stable);
+    fprintf(f, "    \"stopped_early\": %s,\n", stopped_early ? "true" : "false");
+    fprintf(f, "    \"history\": [");
+    for (int i = 0; i < n_hist; i++)
+        fprintf(f, "%s\n      {\"tokens\": %d, \"bottom_jaccard\": %.6f, "
+                   "\"spearman\": %.6f}", i ? "," : "",
+                hist[i].tokens, hist[i].jaccard, hist[i].spearman);
+    fprintf(f, "\n    ]\n  },\n");
     fprintf(f, "  \"wall_seconds\": %ld,\n", elapsed);
     fprintf(f, "  \"layers\":\n");
     poe_accum_write_json(&ob.acc, f, "  ");

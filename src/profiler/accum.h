@@ -74,6 +74,11 @@ void poe_accum_observe_reap(poe_accum *a, uint32_t layer, uint32_t T,
                             const int32_t *ids, const float *weights,
                             const float *norms, uint64_t *bad_ids);
 
+/* Fill out[n_layers * n_experts] with the current per-expert score used
+ * for the pruning decision: REAP mean when reap observations exist,
+ * selection count otherwise. Returns 1 when REAP was used, 0 otherwise. */
+int poe_accum_scores(const poe_accum *a, double *out);
+
 /* Write the accumulated statistics as the per-layer body of a profile:
  * a JSON array (one object per layer). Caller wraps it in the envelope.
  * REAP arrays are emitted only when reap observations exist. */
