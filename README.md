@@ -24,7 +24,8 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe experts` | ✅ expert tensor mapping and sizes |
 | `poe routing-budget` | ✅ exact active-parameter accounting per routed-K |
 | `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K, streamed into a `.poeprofile` |
-| `poe profile` / `compare` / `plan` / `estimate` / `apply` / `forge` / `diff` / `validate` | planned — see [vision.md](vision.md) |
+| `poe compare` | ✅ expert-fingerprint overlap between workload profiles: Jaccard / weighted Jaccard / Spearman / JS divergence, exclusive and cold experts |
+| `poe profile` / `plan` / `estimate` / `apply` / `forge` / `diff` / `validate` | planned — see [vision.md](vision.md) |
 
 ## Build
 

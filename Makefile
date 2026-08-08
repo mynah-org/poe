@@ -9,9 +9,9 @@ WARN     = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wvla
 INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
-LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c
+LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/json.c src/profile.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
-           src/cli/cmd_budget.c
+           src/cli/cmd_budget.c src/cli/cmd_compare.c
 INGOT    = third_party/ingot/ingot.c
 
 SRC      = $(LIB_SRC) $(CLI_SRC) $(INGOT)
@@ -36,9 +36,10 @@ build:
 	mkdir -p build
 
 ## test: synthetic-fixture tests + a CLI smoke run (no model downloads)
-test: build/test_model build/test_accum poe | build
+test: build/test_model build/test_accum build/test_compare poe | build
 	./build/test_model
 	./build/test_accum
+	./build/test_compare
 	@echo "── poe inspect (smoke) ──"
 	./poe inspect build/fixture-moe.gguf
 	./poe inspect build/fixture-moe.gguf --json > /dev/null
@@ -46,12 +47,17 @@ test: build/test_model build/test_accum poe | build
 	./poe experts build/fixture-moe.gguf --json > /dev/null
 	./poe routing-budget build/fixture-moe.gguf
 	./poe routing-budget build/fixture-moe.gguf --json > /dev/null
+	./poe compare build/pa.poeprofile build/pb.poeprofile
+	./poe compare build/pa.poeprofile build/pb.poeprofile --json > /dev/null
 
 build/test_model: tests/test_model.o tests/fixture.o src/model.o src/fmt.o \
                   third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 build/test_accum: tests/test_accum.o src/profiler/accum.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
+build/test_compare: tests/test_compare.o src/json.o src/profile.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 ## profiler: build/poe-profile — MoE router profiler over llama.cpp (M2).

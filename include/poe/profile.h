@@ -1,0 +1,65 @@
+/* poe/profile.h — .poeprofile loading and cross-profile comparison.
+ *
+ * A profile is the persistent, reusable output of `poe-profile`: routing
+ * statistics of one model under one workload. Comparison is where POE
+ * answers "are the same experts used for coding?" — all static, no
+ * inference, exact arithmetic on the stored counters.
+ *
+ * SPDX-License-Identifier: MIT */
+#ifndef POE_PROFILE_H
+#define POE_PROFILE_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define POE_PROFILE_NMASS 4   /* thresholds .80 .90 .95 .99, writer-fixed */
+
+typedef struct {
+    uint32_t version;                 /* "poeprofile" format version       */
+    char     poe_version[32];
+    char     fingerprint[24];         /* source model                      */
+    char     arch[64];
+    char     dataset_hash[40];
+    uint32_t n_layers, n_experts, top_k;
+    uint64_t tokens;
+
+    /* per layer [n_layers] */
+    uint64_t *layer_tokens;
+    double   *entropy_bits;
+    double   *mass_k[POE_PROFILE_NMASS];
+
+    /* per layer × expert [n_layers * n_experts] */
+    uint64_t *sel_count;
+    double   *gate_mean;
+} poe_profile;
+
+int  poe_profile_load(poe_profile **out, const char *path,
+                      char *err, size_t errsz);
+void poe_profile_free(poe_profile *p);
+
+/* ── pairwise comparison ────────────────────────────────────────────────── */
+
+typedef struct {
+    /* top-X% expert-set agreement, across layers */
+    double   jaccard_mean, jaccard_min, jaccard_max;
+    uint32_t jaccard_min_layer, jaccard_max_layer;
+    /* weighted Jaccard of selection frequencies: Σ min / Σ max            */
+    double   wjaccard_mean;
+    /* Spearman rank correlation of selection counts (average-rank ties)   */
+    double   spearman_mean;
+    /* Jensen-Shannon divergence of selection distributions, bits          */
+    double   jsd_bits_mean;
+    /* experts in A's top set but not B's (and vice versa), summed         */
+    uint64_t exclusive_a, exclusive_b;
+    /* experts unselected in BOTH profiles, summed over layers             */
+    uint64_t cold_both;
+} poe_profile_cmp;
+
+/* Compare two profiles of the same shape. `top_frac` selects the top-X%
+ * expert set per layer (e.g. 0.25). `per_layer_jaccard`, if non-NULL,
+ * receives n_layers values. Returns -1 on shape mismatch. */
+int poe_profile_compare(const poe_profile *a, const poe_profile *b,
+                        double top_frac, poe_profile_cmp *out,
+                        double *per_layer_jaccard);
+
+#endif

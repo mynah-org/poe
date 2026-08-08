@@ -19,6 +19,8 @@ static const char USAGE[] =
 "  inspect         <model.gguf> [--json]             MoE structure, storage, reductions\n"
 "  experts         <model.gguf> [--layer N] [--json] expert tensor mapping and sizes\n"
 "  routing-budget  <model.gguf> [--json]             active params as a function of K\n"
+"  compare         <a.poeprofile> <b.poeprofile>...  expert-fingerprint overlap between\n"
+"                  [--top P] [--json]                workload profiles\n"
 "\n"
 "planned (see plan.md for the milestone each belongs to)\n"
 "  profile   observe a workload, write a .poeprofile            (M2, M4, M5)\n"
@@ -58,9 +60,9 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "experts")  == 0) return poe_cmd_experts(sub_argc, sub_argv);
     if (strcmp(cmd, "routing-budget") == 0)
         return poe_cmd_routing_budget(sub_argc, sub_argv);
+    if (strcmp(cmd, "compare")  == 0) return poe_cmd_compare(sub_argc, sub_argv);
 
     if (strcmp(cmd, "profile")  == 0) return stub(cmd, "milestones M2/M4/M5");
-    if (strcmp(cmd, "compare")  == 0) return stub(cmd, "milestone M3");
     if (strcmp(cmd, "plan")     == 0) return stub(cmd, "milestone M6");
     if (strcmp(cmd, "estimate") == 0) return stub(cmd, "milestone M6");
     if (strcmp(cmd, "diff")     == 0) return stub(cmd, "milestone M6");
