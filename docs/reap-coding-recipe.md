@@ -148,6 +148,78 @@ the current sweet spot: 23.7% smaller *and* ~9% faster than stock, still
 10/10. Use `poe routing-budget` for the exact active-parameter numbers
 behind any K.
 
+**Relation to adaptive-routing papers.** Static reduced K is the crude
+form of what the adaptive-K line of work (Ada-K / AdaMoE-style null
+experts / DynMoE, and the mass-K policies on this project's roadmap)
+actually proposes: let the *router decide per token* how many experts to
+run — typically by cutting the sorted gate distribution at a cumulative
+mass threshold — so easy tokens use 3 experts and hard tokens use 8. At
+a matched *average* K that dominates fixed-K on the quality/compute
+Pareto. It cannot be faked with metadata: it needs a change in the
+backend's MoE forward (threshold selection instead of fixed top-k),
+which is why it is a later milestone here. The K=6-free / K=4-broken
+result above is the motivation: if the average can sit near 5–6 with
+peaks at 8 for the tokens that need them, dynamic K collects the speed
+without paying the cliff.
+
+## Performance anatomy
+
+`llama-bench`, 3 repetitions, prompt 2048 / generation 128, at three
+context depths (GB10):
+
+| tg128 t/s (pp2048 t/s) | depth 0 | depth 8k | depth 16k |
+|---|---|---|---|
+| full, K=8 | 95.9 (2888) | 69.5 (2285) | 54.7 (1849) |
+| REAP 25%, K=8 | 92.6 (3257) | 68.2 (2502) | 53.6 (1977) |
+| REAP 25%, K=6 | 103.7 (3712) | 72.3 (2737) | 56.4 (2099) |
+
+What the numbers say:
+
+- **Pruning makes prompt processing faster (+13%), not slower.** In a
+  2048-token ubatch essentially every expert is activated by some token,
+  so the whole expert weight set is streamed per ubatch — 25% fewer
+  experts is 25% fewer weight bytes to read. Fewer experts also means
+  more tokens per expert matmul, which GPUs like.
+- **The small generation penalty is real but bounded (−2 to −3.4%), and
+  it is not the router "struggling".** The router is one `[embd × E]`
+  matvec plus a partial sort — *cheaper* with 96 experts than with 128.
+  At batch 1 the per-token weight traffic (8 expert slabs) is identical;
+  the residual delta is kernel-shape territory (96/80 experts are not
+  the power-of-two shapes the kernels were tuned on), and reduced K
+  flips it positive anyway.
+- **Long context dilutes everything.** Generation speed is FFN (constant
+  per token) + attention KV reads (linear in depth): from depth 0 to 16k
+  the full model drops 95.9 → 54.7 t/s, and the spread between variants
+  compresses (K=6 advantage +8% → +3%, REAP penalty −3.4% → −2%). MoE
+  surgery matters most at short-to-medium context; at long context the
+  KV cache is the wall, which is a different battle (GQA, KV quant).
+
+## Memory anatomy
+
+Allocator numbers from llama.cpp (`-v`), context 8192, same five
+configurations:
+
+| Config | model buffer | KV cache | compute |
+|---|---|---|---|
+| full, K=8 | 17 524 MiB | 768 MiB | 92 MiB |
+| full, K=6 | 17 524 MiB | 768 MiB | 75 MiB |
+| REAP 25%, K=8 | 13 327 MiB | 768 MiB | 92 MiB |
+| REAP 25%, K=6 | 13 327 MiB | 768 MiB | 75 MiB |
+| REAP 50%, K=8 | 9 130 MiB | 768 MiB | 92 MiB |
+
+Three facts, cleanly separated:
+
+- **Reducing K saves essentially no memory.** All experts stay resident
+  whether 8 or 6 run per token — only the activation workspace shrinks
+  (92 → 75 MiB). K is a *compute* knob.
+- **REAP is the memory knob, and it is exactly linear**: −4 197 MiB at
+  25%, −8 394 MiB at 50% — matching `poe plan`'s exact byte accounting
+  to the mebibyte, now confirmed by a third independent party
+  (llama.cpp's allocator).
+- **KV cache belongs to context, not experts**: 768 MiB at 8k either
+  way. On small devices the budget line is
+  `model buffer + KV(context you want)` — REAP frees room for either.
+
 ## Second architecture: gpt-oss-20b (MXFP4)
 
 The same recipe ran unchanged on gpt-oss-20b (24 MoE blocks, 32 experts
