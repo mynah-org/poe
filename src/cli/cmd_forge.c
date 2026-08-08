@@ -72,6 +72,7 @@ int poe_cmd_forge(int argc, char **argv) {
     size_t      n_prof = 0;
     double      prune = 0.25;
     int         force = 0;
+    long        top_k = 0;
 
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
@@ -104,6 +105,13 @@ int poe_cmd_forge(int argc, char **argv) {
             }
             out_path = argv[i];
         }
+        else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) {
+            top_k = atol(argv[++i]);
+            if (top_k < 1) {
+                fprintf(stderr, "poe forge: --top-k needs a positive count\n");
+                return 2;
+            }
+        }
         else if (strcmp(argv[i], "--force") == 0) force = 1;
         else if (argv[i][0] == '-') {
             fprintf(stderr, "poe forge: unknown option '%s'\n", argv[i]);
@@ -121,7 +129,7 @@ int poe_cmd_forge(int argc, char **argv) {
             "usage: poe forge <model.gguf> -o <out.gguf>\n"
             "                 (--profile <p.poeprofile[:W]> ... | --dataset <text>)\n"
             "                 [--method reap|frequency|gate] [--prune P]\n"
-            "                 [--profiler <poe-profile>] [--force]\n");
+            "                 [--top-k K] [--profiler <poe-profile>] [--force]\n");
         return 2;
     }
     if (same_inode(model_path, out_path)) {
@@ -188,7 +196,8 @@ int poe_cmd_forge(int argc, char **argv) {
     printf("── apply ──  %s\n", out_path);
     fflush(stdout);
     poe_apply_stats st;
-    if (poe_apply(m, plan, out_path, force, &st, err, sizeof err) != 0) {
+    if (poe_apply(m, plan, out_path, (uint32_t)top_k, force, &st,
+                  err, sizeof err) != 0) {
         fprintf(stderr, "poe forge: %s\n", err);
         goto done;
     }

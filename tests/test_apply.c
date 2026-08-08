@@ -104,7 +104,7 @@ int main(void) {
     /* ── apply ──────────────────────────────────────────────────────────── */
     printf("apply\n");
     poe_apply_stats st;
-    CHECK(poe_apply(m, p, "build/apply-out.gguf", 0, &st,
+    CHECK(poe_apply(m, p, "build/apply-out.gguf", 0, 0, &st,
                     err, sizeof err) == 0, "apply: %s", err[0] ? err : "ok");
     /* per block: router + gate/up/down exps = 4 sliced tensors */
     CHECK(st.tensors_sliced == 4 * POE_FIX_BLOCKS,
@@ -170,10 +170,24 @@ int main(void) {
 
     /* ── determinism ────────────────────────────────────────────────────── */
     printf("determinism\n");
-    CHECK(poe_apply(m, p, "build/apply-out2.gguf", 0, &st,
+    CHECK(poe_apply(m, p, "build/apply-out2.gguf", 0, 0, &st,
                     err, sizeof err) == 0, "second apply");
     CHECK(same_file("build/apply-out.gguf", "build/apply-out2.gguf"),
           "same plan -> byte-identical output");
+
+    /* ── reduced active top-k baked into the output ─────────────────────── */
+    printf("top-k\n");
+    CHECK(poe_apply(m, p, "build/apply-topk.gguf", 1, 0, &st,
+                    err, sizeof err) == 0, "apply with --top-k 1");
+    CHECK(st.top_k_patched == 1, "expert_used_count patched");
+    CHECK(poe_model_open(&o, "build/apply-topk.gguf", err, sizeof err) == 0,
+          "top-k output reopens");
+    CHECK(o->experts_per_token == 1 && o->expert_count == 6,
+          "active top-k is 1, kept experts still 6");
+    poe_model_close(o);
+    CHECK(poe_apply(m, p, "build/apply-topk-bad.gguf", 7, 0, &st,
+                    err, sizeof err) != 0,
+          "top_k above kept count rejected: %s", err);
 
     /* ── guards ─────────────────────────────────────────────────────────── */
     printf("guards\n");
@@ -181,9 +195,9 @@ int main(void) {
     memcpy(saved, p->model_fingerprint, sizeof saved);
     snprintf(p->model_fingerprint, sizeof p->model_fingerprint,
              "poe1:ffffffffffffffff");
-    CHECK(poe_apply(m, p, "build/apply-bad.gguf", 0, &st,
+    CHECK(poe_apply(m, p, "build/apply-bad.gguf", 0, 0, &st,
                     err, sizeof err) != 0, "fingerprint mismatch rejected: %s", err);
-    CHECK(poe_apply(m, p, "build/apply-bad.gguf", 1, &st,
+    CHECK(poe_apply(m, p, "build/apply-bad.gguf", 0, 1, &st,
                     err, sizeof err) == 0, "--force overrides");
     memcpy(p->model_fingerprint, saved, sizeof saved);
 
@@ -192,7 +206,7 @@ int main(void) {
     poe_model *d;
     CHECK(poe_model_open(&d, "build/apply-dense.gguf", err, sizeof err) == 0,
           "dense open");
-    CHECK(poe_apply(d, p, "build/apply-bad.gguf", 1, &st,
+    CHECK(poe_apply(d, p, "build/apply-bad.gguf", 0, 1, &st,
                     err, sizeof err) != 0, "dense model rejected: %s", err);
     poe_model_close(d);
 

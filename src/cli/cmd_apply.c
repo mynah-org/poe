@@ -6,6 +6,7 @@
  *
  * SPDX-License-Identifier: MIT */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -58,9 +59,17 @@ int poe_cli_verify_pruned(const poe_model *m, const poe_plan *p,
 int poe_cmd_apply(int argc, char **argv) {
     const char *plan_path = NULL, *model_path = NULL, *out_path = NULL;
     int force = 0;
+    long top_k = 0;
 
     for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
+        if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) {
+            top_k = atol(argv[++i]);
+            if (top_k < 1) {
+                fprintf(stderr, "poe apply: --top-k needs a positive count\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
             if (++i == argc) {
                 fprintf(stderr, "poe apply: %s needs a path\n", argv[i - 1]);
                 return 2;
@@ -80,7 +89,7 @@ int poe_cmd_apply(int argc, char **argv) {
     }
     if (plan_path == NULL || model_path == NULL || out_path == NULL) {
         fprintf(stderr, "usage: poe apply <plan.poeplan> <model.gguf> "
-                        "-o <out.gguf> [--force]\n");
+                        "-o <out.gguf> [--top-k K] [--force]\n");
         return 2;
     }
     if (same_inode(model_path, out_path)) {
@@ -106,9 +115,13 @@ int poe_cmd_apply(int argc, char **argv) {
     printf("source    %s   %s   (%s)\n", model_path, m->fingerprint, m->arch);
     printf("experts   %u -> %u per layer across %u MoE layers\n",
            p->n_experts, p->keep_per_layer, m->n_moe_blocks);
+    if (top_k)
+        printf("top-k     %u -> %ld active per token\n",
+               m->experts_per_token, top_k);
 
     poe_apply_stats st;
-    if (poe_apply(m, p, out_path, force, &st, err, sizeof err) != 0) {
+    if (poe_apply(m, p, out_path, (uint32_t)top_k, force, &st,
+                  err, sizeof err) != 0) {
         fprintf(stderr, "poe apply: %s\n", err);
         poe_model_close(m);
         poe_plan_free(p);
@@ -119,9 +132,10 @@ int poe_cmd_apply(int argc, char **argv) {
     poe_format_bytes(m->total_bytes, b1, sizeof b1);
     poe_format_bytes(st.payload_bytes, b2, sizeof b2);
     printf("output    %s\n", out_path);
-    printf("  sliced  %u of %u tensors%s%s\n", st.tensors_sliced,
+    printf("  sliced  %u of %u tensors%s%s%s\n", st.tensors_sliced,
            st.tensors_total,
            st.expert_count_patched ? ", expert_count patched" : "",
+           st.top_k_patched ? ", expert_used_count patched" : "",
            st.kv_dropped ? ", stale poe.* metadata replaced" : "");
     printf("  bytes   %s -> %s   %.1f%% of original\n", b1, b2,
            m->total_bytes

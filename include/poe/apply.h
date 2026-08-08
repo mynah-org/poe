@@ -24,13 +24,20 @@ typedef struct {
     uint32_t tensors_sliced;           /* expert + router tensors rewritten */
     uint32_t kv_dropped;               /* stale poe.* keys from a prior run */
     int      expert_count_patched;     /* <arch>.expert_count updated       */
+    int      top_k_patched;            /* <arch>.expert_used_count updated  */
 } poe_apply_stats;
 
 /* Apply `p` to `m`, writing the pruned checkpoint to out_path. The plan's
  * fingerprint must match the model unless `force`; topology (n_layers,
  * n_experts) must match unconditionally. Single-file GGUF v2/v3 only.
- * Deterministic: same model + same plan -> byte-identical output. */
+ * `top_k` = 0 leaves the active expert count alone; a non-zero value in
+ * [1, keep_per_layer] is baked into <arch>.expert_used_count (the static
+ * form of reduced-K routing: fewer active experts per token, same
+ * checkpoint semantics otherwise).
+ * Deterministic: same model + same plan + same top_k -> byte-identical
+ * output. */
 int poe_apply(const poe_model *m, const poe_plan *p, const char *out_path,
-              int force, poe_apply_stats *stats, char *err, size_t errsz);
+              uint32_t top_k, int force, poe_apply_stats *stats,
+              char *err, size_t errsz);
 
 #endif

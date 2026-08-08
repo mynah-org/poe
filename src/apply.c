@@ -189,8 +189,9 @@ static const poe_block *slice_owner(const poe_model *m, const ingot_tensor *t) {
 }
 
 int poe_apply(const poe_model *m, const poe_plan *p, const char *out_path,
-              int force, poe_apply_stats *stats, char *err, size_t errsz) {
-    poe_apply_stats st = { 0, 0, 0, 0, 0, 0 };
+              uint32_t top_k, int force, poe_apply_stats *stats,
+              char *err, size_t errsz) {
+    poe_apply_stats st = { 0, 0, 0, 0, 0, 0, 0 };
     if (stats) *stats = st;
     if (m == NULL || p == NULL || out_path == NULL)
         return fail(err, errsz, "bad arguments");
@@ -207,6 +208,8 @@ int poe_apply(const poe_model *m, const poe_plan *p, const char *out_path,
         return fail(err, errsz, "plan topology does not match the model");
     if (K == 0 || K > E)
         return fail(err, errsz, "plan keep_per_layer is invalid");
+    if (top_k > K)
+        return fail(err, errsz, "top_k cannot exceed the kept expert count");
 
     for (uint32_t l = 0; l < m->n_blocks; l++) {
         const poe_block *blk = &m->blocks[l];
@@ -274,10 +277,12 @@ int poe_apply(const poe_model *m, const poe_plan *p, const char *out_path,
         return fail(err, errsz, "source GGUF metadata does not parse");
     }
 
-    char eck[80];
+    /* in-place integer patches: expert_count, optionally expert_used_count */
+    char eck[80], euk[80];
     snprintf(eck, sizeof eck, "%s.expert_count", m->arch);
-    size_t   ec_idx = (size_t)-1;
-    uint64_t ec_width = 0;
+    snprintf(euk, sizeof euk, "%s.expert_used_count", m->arch);
+    size_t   ec_idx = (size_t)-1, eu_idx = (size_t)-1;
+    uint64_t ec_width = 0, eu_width = 0;
     uint64_t kv_out_bytes = 0, nkv_out = 0;
     for (uint64_t i = 0; i < nkv; i++) {
         const kv_span *s = &spans[i];
@@ -285,18 +290,26 @@ int poe_apply(const poe_model *m, const poe_plan *p, const char *out_path,
             st.kv_dropped++;                    /* stale provenance */
             continue;
         }
-        if (kv_is(s, eck)) {
-            ec_width = kv_scalar_size(s->type);
-            if (ec_width == 0 || s->type == INGOT_KV_FLOAT32 ||
+        int is_ec = kv_is(s, eck);
+        int is_eu = top_k > 0 && kv_is(s, euk);
+        if (is_ec || is_eu) {
+            uint64_t w = kv_scalar_size(s->type);
+            if (w == 0 || s->type == INGOT_KV_FLOAT32 ||
                 s->type == INGOT_KV_FLOAT64 || s->type == INGOT_KV_BOOL) {
                 free(owner); free(spans);
-                return fail(err, errsz, "expert_count metadata has an "
+                return fail(err, errsz, "expert count metadata has an "
                                         "unexpected type");
             }
-            ec_idx = (size_t)i;
+            if (is_ec) { ec_idx = (size_t)i; ec_width = w; }
+            else       { eu_idx = (size_t)i; eu_width = w; }
         }
         kv_out_bytes += s->end - s->start;
         nkv_out++;
+    }
+    if (top_k > 0 && eu_idx == (size_t)-1) {
+        free(owner); free(spans);
+        return fail(err, errsz, "model has no expert_used_count metadata "
+                                "to patch");
     }
 
     /* fresh provenance, serialized once so its size is known up front */
@@ -354,14 +367,17 @@ int poe_apply(const poe_model *m, const poe_plan *p, const char *out_path,
     for (uint64_t i = 0; i < nkv; i++) {
         const kv_span *s = &spans[i];
         if (s->keylen >= 4 && memcmp(s->key, "poe.", 4) == 0) continue;
-        if ((size_t)i == ec_idx) {
+        if ((size_t)i == ec_idx || (size_t)i == eu_idx) {
+            int is_ec = (size_t)i == ec_idx;
+            uint64_t w = is_ec ? ec_width : eu_width;
             uint8_t v[8];
-            enc_le(v, K, (size_t)ec_width);
+            enc_le(v, is_ec ? K : top_k, (size_t)w);
             if (wput(f, base + s->start, (size_t)(s->val_off - s->start)) != 0 ||
-                wput(f, v, (size_t)ec_width) != 0 ||
-                wput(f, base + s->val_off + ec_width,
-                     (size_t)(s->end - s->val_off - ec_width)) != 0) goto done;
-            st.expert_count_patched = 1;
+                wput(f, v, (size_t)w) != 0 ||
+                wput(f, base + s->val_off + w,
+                     (size_t)(s->end - s->val_off - w)) != 0) goto done;
+            if (is_ec) st.expert_count_patched = 1;
+            else       st.top_k_patched = 1;
         } else {
             if (wput(f, base + s->start, (size_t)(s->end - s->start)) != 0)
                 goto done;

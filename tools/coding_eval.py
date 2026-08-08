@@ -10,7 +10,10 @@
 #   python3 tools/coding_eval.py model-a.gguf [model-b.gguf ...]
 #
 # env: LLAMA_SERVER (default: llama-server on PATH), EVAL_PORT (8089),
-#      EVAL_NGL (99), EVAL_MAX_TOKENS (2400), EVAL_CTX (8192)
+#      EVAL_NGL (99), EVAL_MAX_TOKENS (2400), EVAL_CTX (8192),
+#      EVAL_SERVER_ARGS (extra llama-server args, space-split — e.g.
+#      "--override-kv qwen3moe.expert_used_count=int:6" to test reduced
+#      active top-k without touching the checkpoint)
 #
 # The point is regression *detection*, not leaderboard accuracy: identical
 # prompts, temperature 0, exact-output checkers. A pruned model that loses
@@ -34,6 +37,7 @@ PORT = int(os.environ.get("EVAL_PORT", "8089"))
 NGL = os.environ.get("EVAL_NGL", "99")
 MAX_TOKENS = int(os.environ.get("EVAL_MAX_TOKENS", "2400"))
 CTX = os.environ.get("EVAL_CTX", "8192")
+EXTRA_ARGS = os.environ.get("EVAL_SERVER_ARGS", "").split()
 RUN_TIMEOUT = 10          # seconds per test-case execution
 GEN_TIMEOUT = 600         # seconds per completion request
 
@@ -262,7 +266,7 @@ def eval_model(model_path, port):
     print(f"\n=== {model_path} ===", flush=True)
     proc = subprocess.Popen(
         [SERVER, "-m", model_path, "--port", str(port), "-ngl", NGL,
-         "-c", CTX, "--host", "127.0.0.1"],
+         "-c", CTX, "--host", "127.0.0.1"] + EXTRA_ARGS,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     results = {}
     tps_all, pp_all = [], []

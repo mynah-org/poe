@@ -64,6 +64,8 @@ test: build/test_model build/test_accum build/test_compare build/test_plan \
 	./poe validate build/plan-fix.gguf --plan build/smoke.poeplan
 	./poe validate build/smoke-pruned.gguf --plan build/smoke.poeplan
 	! ./poe validate build/fixture-dense.gguf 2>/dev/null
+	./poe apply build/smoke.poeplan build/plan-fix.gguf --top-k 1 -o build/smoke-topk.gguf > /dev/null
+	./poe validate build/smoke-topk.gguf --plan build/smoke.poeplan > /dev/null
 	./poe plan build/plan-fix.gguf --profile build/plan.poeprofile --method frequency --prune 50% -o build/smoke50.poeplan > /dev/null
 	./poe diff build/smoke.poeplan build/smoke50.poeplan
 	./poe diff build/pa.poeprofile build/pb.poeprofile

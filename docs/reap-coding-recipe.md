@@ -115,6 +115,39 @@ out, at 50% it ignored the tie-breaking rule). 25% is the free lunch;
 beyond that you are trading hard-tier reliability for gigabytes, and
 the eval quantifies that trade per checkpoint.
 
+## The second axis: reducing active top-k
+
+Expert *pruning* shrinks the checkpoint; reducing the *active* expert
+count per token (top-k) cuts compute — they are independent axes and
+they compose. Two ways to run reduced K:
+
+```sh
+# zero-cost experiment, no checkpoint change (llama.cpp KV override):
+llama-server -m model.gguf --override-kv qwen3moe.expert_used_count=int:6
+
+# baked in at apply/forge time:
+poe apply plan.poeplan model.gguf --top-k 6 -o pruned-k6.gguf
+```
+
+Measured on Qwen3-30B-A3B with the same coding eval:
+
+| Config | Eval | Gen t/s |
+|---|---|---|
+| full, K=8 (stock) | 10/10 | 95.0 |
+| full, K=6 | 10/10 | 107.6 |
+| full, K=4 | 6/10 | 126.3 |
+| REAP 25% + K=6 | **10/10** | **103.3** |
+
+K=6 was free on this eval (+13% generation speed); K=4 broke medium and
+hard tiers at once (wrong logic, even a C program using `new` as an
+identifier). The cliff sits between 6 and 4, and the profile predicts
+it: Qwen3's router is flat (mean gate entropy 6.16 of 7 bits), so each
+marginal active expert carries a non-trivial share — you can drop the
+8th and 7th, not half of them. The combined **REAP 25% + K=6** point is
+the current sweet spot: 23.7% smaller *and* ~9% faster than stock, still
+10/10. Use `poe routing-budget` for the exact active-parameter numbers
+behind any K.
+
 ## Second architecture: gpt-oss-20b (MXFP4)
 
 The same recipe ran unchanged on gpt-oss-20b (24 MoE blocks, 32 experts
