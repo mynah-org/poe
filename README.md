@@ -37,6 +37,8 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 Recipe + field notes: [docs/reap-coding-recipe.md](docs/reap-coding-recipe.md).
 Routing-budget measurements (what lowering top-k costs, and why per-layer
 schedules do not pay): [docs/routing-experiments.md](docs/routing-experiments.md).
+Mixed precision per expert slab, and why uniform allocation won:
+[docs/mixed-precision.md](docs/mixed-precision.md).
 
 ## Build
 
