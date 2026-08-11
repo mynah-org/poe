@@ -548,7 +548,10 @@ int ingot_gguf_dequant_matrix(const ingot_gguf *g, const ingot_tensor *t, float 
 /* ── f32 -> block format ────────────────────────────────────────────────────
  * `count` must be a multiple of the block size and `out` must hold
  * count / block_elems * block_bytes bytes (ask ingot_type_nbytes).
- * Supported: F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q6_K. */
+ * Supported: F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K,
+ * Q5_K, Q6_K. The K-quant encoders are unweighted least-squares fits; ggml
+ * additionally weights them with an imatrix, which buys several percent of
+ * relative error at 2-3 bits and almost nothing at 6. */
 int ingot_quantize(int type, const float *values, size_t count, void *out);
 int ingot_can_quantize(int type);
 
