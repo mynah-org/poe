@@ -34,6 +34,8 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe validate` | ✅ structural checks (shapes vs metadata, slab divisibility, quant geometry); with `--plan`, source/pruned provenance and exact byte accounting |
 
 Recipe + field notes: [docs/reap-coding-recipe.md](docs/reap-coding-recipe.md).
+Routing-budget measurements (what lowering top-k costs, and why per-layer
+schedules do not pay): [docs/routing-experiments.md](docs/routing-experiments.md).
 
 ## Build
 
