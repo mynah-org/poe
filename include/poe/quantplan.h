@@ -74,6 +74,16 @@ int poe_quantplan_build(poe_quantplan **out, const poe_model *m,
                         const int *types, size_t n_types, int force,
                         char *err, size_t errsz);
 
+/* The same, with `invert` flipping every layer score (score -> 1 - score).
+ * A deliberately wrong allocation is the control an experiment needs: it
+ * separates "the saliency signal is informative" from "any non-uniform map
+ * moves the number", which is the only way to tell a real effect from an
+ * artifact of, say, activation norms growing with depth. */
+int poe_quantplan_build_ex(poe_quantplan **out, const poe_model *m,
+                           const poe_profile *profile, uint64_t target_bytes,
+                           const int *types, size_t n_types, int force,
+                           int invert, char *err, size_t errsz);
+
 /* The .poequant artifact (JSON, human-diffable). */
 int poe_quantplan_write(const poe_quantplan *p, const char *path,
                         char *err, size_t errsz);

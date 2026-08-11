@@ -78,6 +78,14 @@ int poe_quantplan_build(poe_quantplan **out, const poe_model *m,
                         const poe_profile *profile, uint64_t target_bytes,
                         const int *types, size_t n_types, int force,
                         char *err, size_t errsz) {
+    return poe_quantplan_build_ex(out, m, profile, target_bytes, types,
+                                  n_types, force, 0, err, errsz);
+}
+
+int poe_quantplan_build_ex(poe_quantplan **out, const poe_model *m,
+                           const poe_profile *profile, uint64_t target_bytes,
+                           const int *types, size_t n_types, int force,
+                           int invert, char *err, size_t errsz) {
     if (out == NULL || m == NULL) {
         if (err) snprintf(err, errsz, "null argument");
         return -1;
@@ -179,6 +187,15 @@ int poe_quantplan_build(poe_quantplan **out, const poe_model *m,
     for (uint32_t l = 0; l < p->n_layers; l++)
         p->layer_score[l] = have_scores
             ? (p->layer_score[l] - lo) / (hi - lo) : 1.0;
+    if (invert && have_scores) {
+        for (uint32_t l = 0; l < p->n_layers; l++)
+            p->layer_score[l] = 1.0 - p->layer_score[l];
+        snprintf(p->method, sizeof p->method, "inverted");
+        warn(p, "scores are INVERTED: this is a deliberately wrong control "
+                "allocation, not a plan to ship");
+    } else if (invert) {
+        warn(p, "--invert had nothing to invert: no usable layer scores");
+    }
 
     /* Every routed slab starts at the cheapest candidate. */
     uint64_t floor_bytes = 0;

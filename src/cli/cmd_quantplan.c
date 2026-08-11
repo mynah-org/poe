@@ -76,7 +76,7 @@ int poe_cmd_quantplan(int argc, char **argv) {
     const char *model_path = NULL, *profile_path = NULL;
     const char *out_path = NULL, *tt_path = NULL, *size_arg = NULL;
     char *types_arg = NULL;
-    int force = 0;
+    int force = 0, invert = 0;
 
     for (int i = 0; i < argc; i++) {
         if      (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) profile_path = argv[++i];
@@ -85,6 +85,7 @@ int poe_cmd_quantplan(int argc, char **argv) {
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)        out_path = argv[++i];
         else if (strcmp(argv[i], "--tensor-types") == 0 && i + 1 < argc) tt_path = argv[++i];
         else if (strcmp(argv[i], "--force") == 0) force = 1;
+        else if (strcmp(argv[i], "--invert") == 0) invert = 1;
         else if (argv[i][0] == '-') {
             fprintf(stderr, "poe quantplan: unknown option '%s'\n", argv[i]);
             return 2;
@@ -101,7 +102,9 @@ int poe_cmd_quantplan(int argc, char **argv) {
             "  --target-size    budget for the routed expert slabs together:\n"
             "                   16G / 12.5GiB / 60%% (of the source slabs) / bytes\n"
             "  --profile        rank layers by saliency; without it, uniform\n"
-            "  --tensor-types   also write the --tensor-type file llama-quantize reads\n");
+            "  --tensor-types   also write the --tensor-type file llama-quantize reads\n"
+            "  --invert         flip the saliency ranking: the control allocation an\n"
+            "                   experiment needs, never something to ship\n");
         return 2;
     }
 
@@ -143,8 +146,8 @@ int poe_cmd_quantplan(int argc, char **argv) {
     }
 
     poe_quantplan *p = NULL;
-    if (poe_quantplan_build(&p, m, prof, target, n_types ? types : NULL,
-                            n_types, force, err, sizeof err) != 0) {
+    if (poe_quantplan_build_ex(&p, m, prof, target, n_types ? types : NULL,
+                               n_types, force, invert, err, sizeof err) != 0) {
         fprintf(stderr, "poe quantplan: %s\n", err);
         poe_profile_free(prof);
         poe_model_close(m);
