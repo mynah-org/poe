@@ -10,11 +10,11 @@ INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
 LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
-           src/profiler/imatrix.c src/json.c src/profile.c src/plan.c src/apply.c
+           src/profiler/imatrix.c src/json.c src/profile.c src/plan.c src/apply.c src/quantplan.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c src/cli/cmd_plan.c \
            src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c \
-           src/cli/cmd_forge.c src/cli/cmd_validate.c
+           src/cli/cmd_forge.c src/cli/cmd_validate.c src/cli/cmd_quantplan.c
 INGOT    = third_party/ingot/ingot.c
 
 SRC      = $(LIB_SRC) $(CLI_SRC) $(INGOT)
@@ -40,13 +40,14 @@ build:
 
 ## test: synthetic-fixture tests + a CLI smoke run (no model downloads)
 test: build/test_model build/test_accum build/test_compare build/test_plan \
-      build/test_apply build/test_imatrix poe | build
+      build/test_apply build/test_imatrix build/test_quantplan poe | build
 	./build/test_model
 	./build/test_accum
 	./build/test_imatrix build/test.imatrix.gguf
 	./build/test_compare
 	./build/test_plan
 	./build/test_apply
+	./build/test_quantplan build/fixture-moe.gguf build/plan.poeprofile
 	@echo "── poe inspect (smoke) ──"
 	./poe inspect build/fixture-moe.gguf
 	./poe inspect build/fixture-moe.gguf --json > /dev/null
@@ -81,6 +82,11 @@ build/test_accum: tests/test_accum.o src/profiler/accum.o src/profiler/stability
 
 build/test_imatrix: tests/test_imatrix.o src/profiler/imatrix.o \
                     third_party/ingot/ingot.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
+build/test_quantplan: tests/test_quantplan.o tests/fixture.o src/quantplan.o \
+                      src/profile.o src/json.o src/model.o src/fmt.o \
+                      third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 build/test_compare: tests/test_compare.o src/json.o src/profile.o | build

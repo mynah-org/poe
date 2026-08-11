@@ -15,6 +15,7 @@ int poe_cmd_estimate(int argc, char **argv);
 int poe_cmd_diff(int argc, char **argv);
 int poe_cmd_apply(int argc, char **argv);
 int poe_cmd_forge(int argc, char **argv);
+int poe_cmd_quantplan(int argc, char **argv);
 int poe_cmd_validate(int argc, char **argv);
 
 /* Reopen a pruned checkpoint and verify it against the plan (prints its

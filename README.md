@@ -31,6 +31,7 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe apply` | ✅ structural GGUF pruning: slices packed expert tensors along the expert dimension, compacts router rows in keep order, patches `expert_count`, preserves all other metadata byte-for-byte; streams mmap → output, then reopens and verifies exact accounting |
 | `poe forge` | ✅ the whole pipeline in one command: (profile via `poe-profile` →) plan → exact estimate → apply → verify, intermediate artifacts preserved next to the output |
 | `tools/coding_eval.py` | ✅ pruned-vs-full behavioral eval: 10 coding tasks (easy→hard) generated at temp 0 through llama-server, compiled/executed against hidden test cases; win/fail per task + prompt/generation t/s |
+| `poe quantplan` | ✅ per-slab mixed precision: spend a byte budget across the routed expert slabs (Q2_K..Q6_K ladder, greedy by measured error per byte), exact accounting, emits llama-quantize's `--tensor-type-file` |
 | `poe validate` | ✅ structural checks (shapes vs metadata, slab divisibility, quant geometry); with `--plan`, source/pruned provenance and exact byte accounting |
 
 Recipe + field notes: [docs/reap-coding-recipe.md](docs/reap-coding-recipe.md).

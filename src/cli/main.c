@@ -26,6 +26,10 @@ static const char USAGE[] =
 "                  [--prune P] [-o out.poeplan]\n"
 "  estimate        <plan.poeplan> [model.gguf]       plan accounting (+ verification)\n"
 "  diff            <a> <b>                           diff plans, profiles, or models\n"
+"  quantplan       <model.gguf> --target-size S      mixed precision per expert slab:\n"
+"                  [--profile <p>] [--types ...]     spend a byte budget on the slabs\n"
+"                  [--tensor-types out.txt]          that matter, emit llama-quantize\n"
+"                                                    --tensor-type-file\n"
 "\n"
 "checkpoint rewriting\n"
 "  apply           <plan.poeplan> <model.gguf>       structural expert pruning: slice\n"
@@ -68,6 +72,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "plan")     == 0) return poe_cmd_plan(sub_argc, sub_argv);
     if (strcmp(cmd, "estimate") == 0) return poe_cmd_estimate(sub_argc, sub_argv);
     if (strcmp(cmd, "diff")     == 0) return poe_cmd_diff(sub_argc, sub_argv);
+    if (strcmp(cmd, "quantplan") == 0) return poe_cmd_quantplan(sub_argc, sub_argv);
     if (strcmp(cmd, "apply")    == 0) return poe_cmd_apply(sub_argc, sub_argv);
     if (strcmp(cmd, "forge")    == 0) return poe_cmd_forge(sub_argc, sub_argv);
     if (strcmp(cmd, "validate") == 0) return poe_cmd_validate(sub_argc, sub_argv);
