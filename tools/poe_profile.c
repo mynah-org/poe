@@ -28,6 +28,7 @@
 
 #include "poe/poe.h"
 #include "../src/profiler/accum.h"
+#include "../src/profiler/imatrix.h"
 #include "../src/profiler/stability.h"
 
 #define MAX_WINDOWS 4096
@@ -52,12 +53,35 @@ typedef struct {
     uint32_t *stage_T;               /* tokens staged per layer             */
     uint32_t  batch_cap;
 
+    /* --metric imatrix: per-expert activation statistics. The expert matmul
+     * inputs are a different tensor from anything the routing path reads, so
+     * they get their own buffers rather than sharing the scratch. */
+    poe_imatrix imat;
+    int       capture_imat;
+    uint64_t  imat_skipped;          /* nodes whose input could not be read */
+    float    *imat_act;
+    size_t    imat_act_cap;
+    int32_t  *imat_ids;
+    size_t    imat_ids_cap;
+    void     *imat_scratch;          /* strided input copies                */
+    size_t    imat_scratch_cap;
+
     /* scratch for strided device→host copies */
     void     *scratch;
     size_t    scratch_cap;
 
     uint64_t  tensors_seen;
 } observer;
+
+/* Returns the buffer to use, or NULL if it could not be grown — the caller
+ * assigns it back, so a failed realloc leaves the old buffer intact. */
+static void *grow(void *buf, size_t *cap, size_t n) {
+    if (n <= *cap) return buf;
+    void *p = realloc(buf, n);
+    if (p == NULL) return NULL;
+    *cap = n;
+    return p;
+}
 
 static void *scratch_for(observer *ob, size_t n) {
     if (n > ob->scratch_cap) {
@@ -86,6 +110,41 @@ static int fetch_2d(observer *ob, const struct ggml_tensor *t,
         memcpy((unsigned char *)dst + (size_t)c * ne0 * esz,
                raw + (size_t)c * t->nb[1], (size_t)ne0 * esz);
     return 0;
+}
+
+/* Copy an [ne0 × ne1 × ne2] f32 tensor to a contiguous host buffer. The
+ * expert-matmul input is usually contiguous; when it is a view, fetch the
+ * backing span once and stride-walk — the same trick as fetch_2d, but with
+ * its own scratch so fetching the ids afterwards cannot clobber it. */
+static int fetch_act(observer *ob, const struct ggml_tensor *t, float *dst) {
+    const size_t ne0 = (size_t)t->ne[0], ne1 = (size_t)t->ne[1],
+                 ne2 = (size_t)t->ne[2];
+    if (ggml_is_contiguous(t)) {
+        ggml_backend_tensor_get(t, dst, 0, ne0 * ne1 * ne2 * sizeof(float));
+        return 0;
+    }
+    if (t->nb[0] != sizeof(float)) return -1;      /* rows must be dense */
+    const size_t span = (size_t)t->nb[2] * (ne2 - 1) +
+                        (size_t)t->nb[1] * (ne1 - 1) + ne0 * sizeof(float);
+    unsigned char *raw = grow(ob->imat_scratch, &ob->imat_scratch_cap, span);
+    if (raw == NULL) return -1;
+    ob->imat_scratch = raw;
+    ggml_backend_tensor_get(t, raw, 0, span);
+    for (size_t z = 0; z < ne2; z++)
+        for (size_t y = 0; y < ne1; y++)
+            memcpy(dst + (z * ne1 + y) * ne0,
+                   raw + z * (size_t)t->nb[2] + y * (size_t)t->nb[1],
+                   ne0 * sizeof(float));
+    return 0;
+}
+
+/* Which routed projection a graph node belongs to, or -1. Only the three
+ * MUL_MAT_ID nodes carry expert inputs worth an imatrix. */
+static int imat_proj_of(const char *kind) {
+    if (strcmp(kind, "gate") == 0) return POE_IMAT_GATE;
+    if (strcmp(kind, "up")   == 0) return POE_IMAT_UP;
+    if (strcmp(kind, "down") == 0) return POE_IMAT_DOWN;
+    return -1;
 }
 
 /* "ffn_moe_<kind>-<layer>" -> kind + layer. Returns 0 on match. */
@@ -143,10 +202,42 @@ static bool moe_cb(struct ggml_tensor *t, bool ask, void *ud) {
     int is_topk  = strcmp(kind, "topk") == 0;
     int is_down  = ob->capture_down && strcmp(kind, ob->down_kind) == 0;
     int wprio    = weights_prio(kind);
+    int iproj    = (ob->capture_imat && t->op == GGML_OP_MUL_MAT_ID)
+                 ? imat_proj_of(kind) : -1;
 
-    if (ask) return is_probs || is_topk || is_down || wprio > 0;
+    if (ask) return is_probs || is_topk || is_down || iproj >= 0 || wprio > 0;
 
     ob->tensors_seen++;
+
+    /* The imatrix reads this node's INPUT, so it coexists with the REAP
+     * capture of the down node's output: fold it in, then fall through. */
+    if (iproj >= 0) {
+        const struct ggml_tensor *src1 = t->src[1], *ids = t->src[2];
+        if (src1 == NULL || ids == NULL || src1->type != GGML_TYPE_F32 ||
+            ids->ne[1] != src1->ne[2]) {
+            ob->imat_skipped++;
+        } else {
+            const size_t cols  = (size_t)src1->ne[0];
+            const size_t rows  = (size_t)src1->ne[1];
+            const size_t nt    = (size_t)src1->ne[2];
+            const size_t nused = (size_t)ids->ne[0];
+            float *act = grow(ob->imat_act, &ob->imat_act_cap,
+                              cols * rows * nt * sizeof *ob->imat_act);
+            if (act != NULL) ob->imat_act = act;
+            int32_t *idb = grow(ob->imat_ids, &ob->imat_ids_cap,
+                                nused * nt * sizeof *ob->imat_ids);
+            if (idb != NULL) ob->imat_ids = idb;
+
+            if (act == NULL || idb == NULL ||
+                fetch_act(ob, src1, act) != 0 ||
+                fetch_2d(ob, ids, idb, sizeof(int32_t)) != 0 ||
+                poe_imatrix_observe(&ob->imat, layer, (poe_imat_proj)iproj,
+                                    (uint32_t)cols, (uint32_t)rows,
+                                    (uint32_t)nused, (uint32_t)nt,
+                                    act, idb, &ob->bad_ids) != 0)
+                ob->imat_skipped++;
+        }
+    }
 
     if (is_probs) {
         /* [n_experts × T] */
@@ -283,13 +374,18 @@ static uint64_t fnv1a64(const void *data, size_t n) {
 static void usage(void) {
     fprintf(stderr,
         "usage: poe-profile <model.gguf> --dataset <file.txt|file.jsonl>\n"
-        "                   [--metric routing|reap] [-o out.poeprofile]\n"
+        "                   [--metric routing|reap|imatrix] [-o out.poeprofile]\n"
+        "                   [--imatrix-out out.imatrix.gguf]\n"
         "                   [--max-tokens N] [--batch N] [--ngl N] [--threads N]\n"
         "                   [--until-stable S] [--stable-windows K] [--bottom F]\n"
         "\n"
         "  --metric routing   selection counts, gate stats, entropy, mass-K (cheap)\n"
         "  --metric reap      the above plus expert-output norms for REAP saliency\n"
         "                     (captures ffn_moe_down: slower, ~n_embd*k*4 B/token/layer)\n"
+        "  --metric imatrix   routing plus per-expert activation statistics, written\n"
+        "                     as llama.cpp's GGUF imatrix (feeds llama-quantize\n"
+        "                     --imatrix, and any bit allocation that weights by\n"
+        "                     what the calibration actually exercised)\n"
         "\n"
         "convergence (checked once per batch of --batch tokens):\n"
         "  --until-stable S   stop early when the bottom-F prune set's Jaccard\n"
@@ -300,7 +396,7 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
     const char *model_path = NULL, *dataset_path = NULL, *out_path = NULL;
-    const char *metric = "routing";
+    const char *metric = "routing", *imat_path = NULL;
     long max_tokens = 8192, n_batch = 2048, ngl = 999, n_threads = 0;
     double until_stable = 0.0, bottom_frac = 0.25;
     long stable_windows = 2;
@@ -309,6 +405,7 @@ int main(int argc, char **argv) {
         if      (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_path = argv[++i];
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)        out_path = argv[++i];
         else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc)  metric = argv[++i];
+        else if (strcmp(argv[i], "--imatrix-out") == 0 && i + 1 < argc) imat_path = argv[++i];
         else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) max_tokens = atol(argv[++i]);
         else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc)   n_batch = atol(argv[++i]);
         else if (strcmp(argv[i], "--ngl") == 0 && i + 1 < argc)     ngl = atol(argv[++i]);
@@ -326,8 +423,12 @@ int main(int argc, char **argv) {
     }
     if (model_path == NULL || dataset_path == NULL) { usage(); return 2; }
     if (strcmp(metric, "routing") != 0 && strcmp(metric, "gate") != 0 &&
-        strcmp(metric, "reap") != 0) {
+        strcmp(metric, "reap") != 0 && strcmp(metric, "imatrix") != 0) {
         fprintf(stderr, "poe-profile: unknown metric '%s'\n", metric);
+        return 2;
+    }
+    if (imat_path != NULL && strcmp(metric, "imatrix") != 0) {
+        fprintf(stderr, "poe-profile: --imatrix-out needs --metric imatrix\n");
         return 2;
     }
 
@@ -351,6 +452,12 @@ int main(int argc, char **argv) {
     ob.top_k     = pm->experts_per_token;
     ob.probs_are_logits = strcmp(pm->arch, "gpt-oss") == 0;
     ob.capture_down = strcmp(metric, "reap") == 0;
+    ob.capture_imat = strcmp(metric, "imatrix") == 0;
+    if (ob.capture_imat &&
+        poe_imatrix_init(&ob.imat, ob.n_layers, ob.n_experts) != 0) {
+        fprintf(stderr, "poe-profile: cannot initialise the imatrix\n");
+        return 1;
+    }
     /* gpt-oss experts carry biases: the applied output is the biased one */
     ob.down_kind = ob.probs_are_logits ? "down_biased" : "down";
     ob.batch_cap = (uint32_t)n_batch;
@@ -473,6 +580,9 @@ int main(int argc, char **argv) {
     if (ob.capture_down)
         fprintf(stderr, ", %llu reap captures skipped",
                 (unsigned long long)ob.reap_skipped);
+    if (ob.capture_imat)
+        fprintf(stderr, ", %llu imatrix captures skipped",
+                (unsigned long long)ob.imat_skipped);
     fprintf(stderr, "\n");
 
     if (ob.tensors_seen == 0) {
@@ -502,8 +612,9 @@ int main(int argc, char **argv) {
             (unsigned long long)ds_hash);
     fprintf(f, "  \"dataset_bytes\": %zu,\n", ds_len);
     fprintf(f, "  \"tokens\": %d,\n", n_toks);
-    fprintf(f, "  \"metrics\": [\"routing\", \"gate\"%s],\n",
-            ob.capture_down ? ", \"reap\"" : "");
+    fprintf(f, "  \"metrics\": [\"routing\", \"gate\"%s%s],\n",
+            ob.capture_down ? ", \"reap\"" : "",
+            ob.capture_imat ? ", \"imatrix\"" : "");
     fprintf(f, "  \"tokens_scored\": %d,\n", done);
     fprintf(f, "  \"convergence\": {\n");
     fprintf(f, "    \"bottom_fraction\": %.4f,\n", bottom_frac);
@@ -521,6 +632,30 @@ int main(int argc, char **argv) {
     fprintf(f, "\n}\n");
     fclose(f);
     fprintf(stderr, "poe-profile: wrote %s\n", out_path);
+
+    if (ob.capture_imat) {
+        char imdef[512];
+        if (imat_path == NULL) {
+            snprintf(imdef, sizeof imdef, "%s.imatrix.gguf", model_path);
+            imat_path = imdef;
+        }
+        if (!poe_imatrix_has_data(&ob.imat)) {
+            fprintf(stderr, "poe-profile: no expert activations were captured — "
+                            "no imatrix written\n");
+        } else {
+            /* Chunks are this runner's batches, which is what chunk_size
+             * means to a reader: the token count one accumulation spans. */
+            const uint32_t chunks = (uint32_t)((done + n_batch - 1) / n_batch);
+            if (poe_imatrix_write_gguf(&ob.imat, imat_path, dataset_path,
+                                       chunks, (uint32_t)n_batch,
+                                       err, sizeof err) != 0)
+                fprintf(stderr, "poe-profile: cannot write '%s': %s\n",
+                        imat_path, err);
+            else
+                fprintf(stderr, "poe-profile: wrote %s\n", imat_path);
+        }
+        poe_imatrix_free(&ob.imat);
+    }
 
     llama_free(ctx);
     llama_model_free(model);

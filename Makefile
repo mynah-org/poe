@@ -10,7 +10,7 @@ INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
 LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
-           src/json.c src/profile.c src/plan.c src/apply.c
+           src/profiler/imatrix.c src/json.c src/profile.c src/plan.c src/apply.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c src/cli/cmd_plan.c \
            src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c \
@@ -40,9 +40,10 @@ build:
 
 ## test: synthetic-fixture tests + a CLI smoke run (no model downloads)
 test: build/test_model build/test_accum build/test_compare build/test_plan \
-      build/test_apply poe | build
+      build/test_apply build/test_imatrix poe | build
 	./build/test_model
 	./build/test_accum
+	./build/test_imatrix build/test.imatrix.gguf
 	./build/test_compare
 	./build/test_plan
 	./build/test_apply
@@ -78,6 +79,10 @@ build/test_model: tests/test_model.o tests/fixture.o src/model.o src/fmt.o \
 build/test_accum: tests/test_accum.o src/profiler/accum.o src/profiler/stability.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
+build/test_imatrix: tests/test_imatrix.o src/profiler/imatrix.o \
+                    third_party/ingot/ingot.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
 build/test_compare: tests/test_compare.o src/json.o src/profile.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
@@ -100,10 +105,11 @@ LLAMA_LIB  = -L$(LLAMA_DIR)/build/bin -lllama -lggml -lggml-base \
 
 profiler: build/poe-profile
 build/poe-profile: tools/poe_profile.c src/profiler/accum.o \
-                   src/profiler/stability.o src/model.o src/fmt.o \
-                   third_party/ingot/ingot.o | build
+                   src/profiler/imatrix.o src/profiler/stability.o \
+                   src/model.o src/fmt.o third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $(INCLUDE) $(LLAMA_INC) $< \
-	      src/profiler/accum.o src/profiler/stability.o src/model.o src/fmt.o \
+	      src/profiler/accum.o src/profiler/imatrix.o src/profiler/stability.o \
+	      src/model.o src/fmt.o \
 	      third_party/ingot/ingot.o $(LLAMA_LIB) $(LDLIBS) -o $@
 
 ## tools: build/poe-mkfixture (synthetic GGUF generator)
