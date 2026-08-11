@@ -1,0 +1,85 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 2be3b75..9e4be2b 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1867,6 +1867,37 @@ ggml_tensor * llm_graph_context::build_ffn(
+     return cur;
+ }
+ 
++// POE R7: optional per-layer expert budget.
++//
++// POE_K_SCHEDULE is a comma-separated list of expert counts, one per layer
++// (e.g. "8,8,6,6,4,..."). A missing entry, or a value <= 0, leaves that layer
++// at the model's nominal top-k. Values are clamped so the schedule can only
++// *reduce* the number of experts executed, never raise it: the selection
++// tensor shrinks, so fewer expert matmuls are actually scheduled.
++static int64_t poe_layer_expert_budget(int il, int64_t n_expert_used) {
++    static std::vector<int> sched;
++    static bool loaded = false;
++    if (!loaded) {
++        loaded = true;
++        const char * env = getenv("POE_K_SCHEDULE");
++        if (env) {
++            for (const char * p = env; *p; ) {
++                char * end = nullptr;
++                long v = strtol(p, &end, 10);
++                if (end == p) { break; }
++                sched.push_back((int) v);
++                p = end;
++                while (*p == 44 || *p == 32) { p++; }
++            }
++            LLAMA_LOG_INFO("POE: per-layer expert schedule loaded (%zu layers)\n", sched.size());
++        }
++    }
++    if (il < 0 || (size_t) il >= sched.size()) { return n_expert_used; }
++    const int64_t k = (int64_t) sched[il];
++    if (k <= 0 || k >= n_expert_used) { return n_expert_used; }
++    return k;
++}
++
+ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * cur,
+          ggml_tensor * gate_inp,
+@@ -1936,6 +1967,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * gate_exps_s,
+          ggml_tensor * down_exps_s,
+          ggml_tensor * selected_experts_in) const {
++    // POE R7: per-layer expert budget, clamped to the nominal top-k.
++    n_expert_used = poe_layer_expert_budget(il, n_expert_used);
++
+     const int64_t n_embd   = cur->ne[0];
+     const int64_t n_tokens = cur->ne[1];
+     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
+@@ -2233,8 +2267,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+ 
+     assert(n_expert_used > 0);
+ 
++    // POE R7: honour the per-layer budget here too. Upstream bounds these
++    // loops by hparams.n_expert_used to cap add nodes during warmup (when the
++    // local count can be larger); a per-layer budget makes it smaller, so the
++    // correct bound is the minimum of the two.
++    const uint32_t n_expert_agg = (uint32_t) (n_expert_used < (int64_t) hparams.n_expert_used
++                                              ? n_expert_used : (int64_t) hparams.n_expert_used);
++
+     // order the views before the adds
+-    for (uint32_t i = 0; i < hparams.n_expert_used; ++i) {
++    for (uint32_t i = 0; i < n_expert_agg; ++i) {
+         cur_experts[i] = ggml_view_2d(ctx0, experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1]);
+ 
+         ggml_build_forward_expand(gf, cur_experts[i]);
+@@ -2246,13 +2287,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     //       ref: https://github.com/ggml-org/llama.cpp/pull/14753
+     ggml_tensor * moe_out = cur_experts[0];
+ 
+-    for (uint32_t i = 1; i < hparams.n_expert_used; ++i) {
++    for (uint32_t i = 1; i < n_expert_agg; ++i) {
+         moe_out = ggml_add(ctx0, moe_out, cur_experts[i]);
+ 
+         ggml_build_forward_expand(gf, moe_out);
+     }
+ 
+-    if (hparams.n_expert_used == 1) {
++    if (n_expert_agg == 1) {
+         // avoid returning a non-contiguous tensor
+         moe_out = ggml_cont(ctx0, moe_out);
+     }
