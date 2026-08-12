@@ -131,7 +131,7 @@ int poe_apply(const poe_model *m, const poe_plan *p, const char *out_path,
     }
 
     /* in-place integer patches: expert_count, optionally expert_used_count */
-    char eck[80], euk[80];
+    char eck[96], euk[96];   /* arch[64] plus the longest suffix */
     snprintf(eck, sizeof eck, "%s.expert_count", m->arch);
     snprintf(euk, sizeof euk, "%s.expert_used_count", m->arch);
     size_t   ec_idx = (size_t)-1, eu_idx = (size_t)-1;
