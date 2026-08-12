@@ -8,6 +8,21 @@
 
 const double poe_accum_mass_thresholds[POE_ACCUM_NMASS] = { 0.80, 0.90, 0.95, 0.99 };
 
+/* Bin for "this token needed k of E experts". Width is ceil(E/KHIST), so
+ * the mapping is exact for small expert counts and coarse-but-honest for
+ * large ones — never saturating. */
+uint32_t poe_accum_khist_bin(uint32_t k, uint32_t n_experts) {
+    if (k == 0) k = 1;
+    if (n_experts == 0) n_experts = 1;
+    const uint32_t w = (n_experts + POE_ACCUM_KHIST - 1) / POE_ACCUM_KHIST;
+    const uint32_t b = (k - 1) / (w ? w : 1);
+    return b < POE_ACCUM_KHIST ? b : POE_ACCUM_KHIST - 1;
+}
+
+static uint32_t khist_bin(uint32_t k, uint32_t n_experts) {
+    return poe_accum_khist_bin(k, n_experts);
+}
+
 int poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,
                    uint32_t top_k) {
     memset(a, 0, sizeof *a);
@@ -99,8 +114,7 @@ void poe_accum_observe_probs(poe_accum *a, uint32_t layer, uint32_t T,
             while (ti < POE_ACCUM_NMASS && cum >= poe_accum_mass_thresholds[ti]) {
                 a->mass_k_sum[ti][layer] += (double)k;
                 a->mass_k_hist[ti][(size_t)layer * POE_ACCUM_KHIST +
-                                   (k <= POE_ACCUM_KHIST - 1 ? k - 1
-                                                             : POE_ACCUM_KHIST - 1)]++;
+                                   khist_bin(k, E)]++;
                 ti++;
             }
         }
@@ -108,7 +122,7 @@ void poe_accum_observe_probs(poe_accum *a, uint32_t layer, uint32_t T,
         for (; ti < POE_ACCUM_NMASS; ti++) {
             a->mass_k_sum[ti][layer] += (double)E;
             a->mass_k_hist[ti][(size_t)layer * POE_ACCUM_KHIST +
-                               POE_ACCUM_KHIST - 1]++;
+                               khist_bin(E, E)]++;
         }
 
         a->tok_probs[layer]++;

@@ -47,8 +47,13 @@ static void print_mass_k(const poe_profile *pr) {
         return;
     }
 
-    printf("\nExperts a token actually needs   (pooled over %u layers, %llu tokens)\n",
-           pr->n_layers, (unsigned long long)pr->tokens);
+    const uint32_t E = pr->n_experts ? pr->n_experts : 1;
+    const uint32_t w = (E + POE_PROFILE_KHIST - 1) / POE_PROFILE_KHIST;
+    printf("\nExperts a token actually needs   (pooled over %u layers, "
+           "%llu tokens, of %u experts)\n",
+           pr->n_layers, (unsigned long long)pr->tokens, E);
+    if (w > 1)
+        printf("  bins are %u experts wide; values are the upper edge\n", w);
     printf("  mass    mean    p50   p90   p99   max    share of tokens at or below the mean\n");
     for (int i = 0; i < POE_PROFILE_NMASS; i++) {
         if (pr->mass_k_hist[i] == NULL) continue;
@@ -62,9 +67,14 @@ static void print_mass_k(const poe_profile *pr) {
         }
         if (total == 0) continue;
 
+        /* bin b covers k in [b*w+1, (b+1)*w]; report its upper edge, capped
+         * at the expert count, so a number is never larger than reality */
         double mean = 0;
-        for (int b = 0; b < POE_PROFILE_KHIST; b++)
-            mean += (double)(b + 1) * (double)bins[b];
+        for (int b = 0; b < POE_PROFILE_KHIST; b++) {
+            const uint32_t hi = (uint32_t)(b + 1) * w < E
+                              ? (uint32_t)(b + 1) * w : E;
+            mean += (double)hi * (double)bins[b];
+        }
         mean /= (double)total;
 
         uint32_t q[3] = { 0, 0, 0 };
@@ -73,20 +83,24 @@ static void print_mass_k(const poe_profile *pr) {
         int qi = 0;
         uint32_t maxk = 1;
         for (int b = 0; b < POE_PROFILE_KHIST; b++) {
-            if (bins[b]) maxk = (uint32_t)b + 1;
+            const uint32_t hi = (uint32_t)(b + 1) * w < E
+                              ? (uint32_t)(b + 1) * w : E;
+            if (bins[b]) maxk = hi;
             cum += bins[b];
             while (qi < 3 && (double)cum / (double)total >= want[qi])
-                q[qi++] = (uint32_t)b + 1;
+                q[qi++] = hi;
         }
         while (qi < 3) q[qi++] = maxk;
 
         uint64_t at_or_below = 0;
-        for (int b = 0; b < POE_PROFILE_KHIST && (double)(b + 1) <= mean; b++)
-            at_or_below += bins[b];
+        for (int b = 0; b < POE_PROFILE_KHIST; b++) {
+            const uint32_t hi = (uint32_t)(b + 1) * w < E
+                              ? (uint32_t)(b + 1) * w : E;
+            if ((double)hi <= mean) at_or_below += bins[b];
+        }
 
-        printf("  %3.0f%%   %5.2f   %4u  %4u  %4u  %4u%s    %5.1f%%\n",
+        printf("  %3.0f%%   %6.1f  %4u  %4u  %4u  %4u     %5.1f%%\n",
                thr[i] * 100.0, mean, q[0], q[1], q[2], maxk,
-               maxk >= POE_PROFILE_KHIST ? "+" : " ",
                100.0 * (double)at_or_below / (double)total);
     }
     printf("\n  A fixed K must be set for the tail, so the gap between p50 and p99\n"

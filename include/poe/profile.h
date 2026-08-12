@@ -13,7 +13,7 @@
 #include <stdint.h>
 
 #define POE_PROFILE_NMASS 4    /* thresholds .80 .90 .95 .99, writer-fixed  */
-#define POE_PROFILE_KHIST 33   /* min-k bins: 1..32 experts, then "more"    */
+#define POE_PROFILE_KHIST 64   /* min-k bins spanning 1..n_experts          */
 
 typedef struct {
     uint32_t version;                 /* "poeprofile" format version       */

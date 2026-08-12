@@ -25,9 +25,13 @@ extern const double poe_accum_mass_thresholds[POE_ACCUM_NMASS]; /* .80 .90 .95 .
  * worth kernel work: whether tokens differ from each other. A schedule can
  * only exploit variation across layers; adaptivity needs variation across
  * tokens, and a mean hides it completely. So the full distribution is kept
- * as a histogram — 32 bins plus an overflow, because a token needing more
- * than 32 of 256 experts is already past any budget worth running. */
-#define POE_ACCUM_KHIST 33
+ * as a histogram. The bins span the whole expert count rather than a fixed
+ * prefix: on a 256-expert router with entropy near 8 bits, the mass a token
+ * needs is measured in hundreds of experts, and a histogram capped at a
+ * small prefix reports saturation instead of an answer — it did, on the
+ * first run. Bin b covers k in [b*w+1, (b+1)*w] with w = ceil(E/KHIST), so
+ * the resolution is exact whenever E <= KHIST. */
+#define POE_ACCUM_KHIST 64
 
 
 typedef struct {
@@ -57,6 +61,10 @@ typedef struct {
     double   *mass_k_sum[POE_ACCUM_NMASS]; /* Σ of min-k reaching threshold    */
     uint64_t *mass_k_hist[POE_ACCUM_NMASS];/* [layer][bin], bin 32 = "more"    */
 } poe_accum;
+
+/* Which histogram bin a min-k of `k` out of `n_experts` lands in. Exposed
+ * because a reader has to invert it to report percentiles in experts. */
+uint32_t poe_accum_khist_bin(uint32_t k, uint32_t n_experts);
 
 int  poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,
                     uint32_t top_k);
