@@ -1,0 +1,344 @@
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index 836cfad..3ab9433 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -400,6 +400,9 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
+     { LLM_TENSOR_FFN_DOWN_EXP,                           "blk.%d.ffn_down.%d" },
+     { LLM_TENSOR_FFN_UP_EXP,                             "blk.%d.ffn_up.%d" },
+     { LLM_TENSOR_FFN_GATE_EXPS,                          "blk.%d.ffn_gate_exps" },
++    { LLM_TENSOR_FFN_GATE_EXPS_COLD,                     "blk.%d.ffn_gate_exps_cold" },
++    { LLM_TENSOR_FFN_UP_EXPS_COLD,                       "blk.%d.ffn_up_exps_cold" },
++    { LLM_TENSOR_FFN_DOWN_EXPS_COLD,                     "blk.%d.ffn_down_exps_cold" },
+     { LLM_TENSOR_FFN_GATE_UP_EXPS,                       "blk.%d.ffn_gate_up_exps" },
+     { LLM_TENSOR_FFN_DOWN_EXPS,                          "blk.%d.ffn_down_exps" },
+     { LLM_TENSOR_FFN_UP_EXPS,                            "blk.%d.ffn_up_exps" },
+@@ -793,6 +796,9 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
+     {LLM_TENSOR_ENC_ATTN_REL_B,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_GET_ROWS}},
+     {LLM_TENSOR_FFN_DOWN_EXPS,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_GATE_EXPS,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_GATE_EXPS_COLD,         {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_UP_EXPS_COLD,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_DOWN_EXPS_COLD,         {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_UP_EXPS,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_GATE_UP_EXPS,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_DOWN_CHEXPS,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 49c2a6a..7dd2828 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -427,6 +427,9 @@ enum llm_tensor {
+     LLM_TENSOR_FFN_NORM_EXPS,
+     LLM_TENSOR_FFN_DOWN_EXPS, // merged experts
+     LLM_TENSOR_FFN_GATE_EXPS,
++    LLM_TENSOR_FFN_GATE_EXPS_COLD,   // POE split: low-precision half
++    LLM_TENSOR_FFN_UP_EXPS_COLD,
++    LLM_TENSOR_FFN_DOWN_EXPS_COLD,
+     LLM_TENSOR_FFN_UP_EXPS,
+     LLM_TENSOR_FFN_GATE_UP_EXPS,
+     LLM_TENSOR_FFN_DOWN_SHEXP,
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 2be3b75..faf1c4b 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1867,6 +1867,37 @@ ggml_tensor * llm_graph_context::build_ffn(
+     return cur;
+ }
+ 
++// POE R7: optional per-layer expert budget.
++//
++// POE_K_SCHEDULE is a comma-separated list of expert counts, one per layer
++// (e.g. "8,8,6,6,4,..."). A missing entry, or a value <= 0, leaves that layer
++// at the model's nominal top-k. Values are clamped so the schedule can only
++// *reduce* the number of experts executed, never raise it: the selection
++// tensor shrinks, so fewer expert matmuls are actually scheduled.
++static int64_t poe_layer_expert_budget(int il, int64_t n_expert_used) {
++    static std::vector<int> sched;
++    static bool loaded = false;
++    if (!loaded) {
++        loaded = true;
++        const char * env = getenv("POE_K_SCHEDULE");
++        if (env) {
++            for (const char * p = env; *p; ) {
++                char * end = nullptr;
++                long v = strtol(p, &end, 10);
++                if (end == p) { break; }
++                sched.push_back((int) v);
++                p = end;
++                while (*p == 44 || *p == 32) { p++; }
++            }
++            LLAMA_LOG_INFO("POE: per-layer expert schedule loaded (%zu layers)\n", sched.size());
++        }
++    }
++    if (il < 0 || (size_t) il >= sched.size()) { return n_expert_used; }
++    const int64_t k = (int64_t) sched[il];
++    if (k <= 0 || k >= n_expert_used) { return n_expert_used; }
++    return k;
++}
++
+ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * cur,
+          ggml_tensor * gate_inp,
+@@ -1886,7 +1917,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * up_exps_s,
+          ggml_tensor * gate_exps_s,
+          ggml_tensor * down_exps_s,
+-         ggml_tensor * selected_experts_in) const {
++         ggml_tensor * selected_experts_in,
++         ggml_tensor * up_exps_cold,
++         ggml_tensor * gate_exps_cold,
++         ggml_tensor * down_exps_cold) const {
+     return build_moe_ffn(
+         cur,
+         gate_inp,  /* gate_inp_b  */ nullptr,
+@@ -1907,7 +1941,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         up_exps_s,
+         gate_exps_s,
+         down_exps_s,
+-        selected_experts_in
++        selected_experts_in,
++        up_exps_cold,
++        gate_exps_cold,
++        down_exps_cold
+     );
+ }
+ 
+@@ -1935,7 +1972,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * up_exps_s,
+          ggml_tensor * gate_exps_s,
+          ggml_tensor * down_exps_s,
+-         ggml_tensor * selected_experts_in) const {
++         ggml_tensor * selected_experts_in,
++         ggml_tensor * up_exps_cold,
++         ggml_tensor * gate_exps_cold,
++         ggml_tensor * down_exps_cold) const {
++    // POE R7: per-layer expert budget, clamped to the nominal top-k.
++    n_expert_used = poe_layer_expert_budget(il, n_expert_used);
++
+     const int64_t n_embd   = cur->ne[0];
+     const int64_t n_tokens = cur->ne[1];
+     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
+@@ -2075,7 +2118,63 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     //call early so that topk-moe can be used
+     ggml_build_forward_expand(gf, weights);
+ 
+-    cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
++    // POE split: the routed experts live in two tensors, the hot ones first.
++    // Expert id keeps meaning "row of the router", so `id < n_hot` decides
++    // which tensor a slot belongs to and no remap table is needed. Both
++    // halves run over every slot and the results are merged per slot, so the
++    // routing the model sees is exactly the one the router asked for — the
++    // cost is one extra mul_mat_id pass, which is the trade M9b measured.
++    // POE_SPLIT_PASSES=1 runs only the hot half: numerically wrong, but it
++    // isolates which half of the split a failure belongs to.
++    static const int poe_passes_env = getenv("POE_SPLIT_PASSES")
++                                    ? atoi(getenv("POE_SPLIT_PASSES")) : 2;
++    const bool poe_split = down_exps_cold != nullptr && poe_passes_env >= 2;
++    const bool poe_hot_only = down_exps_cold != nullptr && poe_passes_env == 1;
++    ggml_tensor * poe_sel_cold = nullptr;
++    ggml_tensor * poe_hot_mask = nullptr;
++    if (poe_split) {
++        const int64_t n_hot  = down_exps->ne[2];
++        const int64_t n_cold = down_exps_cold->ne[2];
++
++        // ggml_clamp is IN-PLACE and returns a view of its input, so each of
++        // the three derived tensors below has to start from its own cast of
++        // the ids. Sharing one f32 copy makes the clamps race: on the CPU
++        // graph order hides it, on CUDA the hot ids come out of range and the
++        // expert matmul reads past the end of its tensor.
++        ggml_tensor * sel_c = ggml_cont(ctx0, selected_experts);
++        ggml_tensor * sel_f_hot  = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++        ggml_tensor * sel_f_cold = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++        ggml_tensor * sel_f_mask = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++
++        // hot pass reads a valid row for every slot; cold slots are zeroed by
++        // the mask below, so the row they clamp onto never reaches the output
++        selected_experts = ggml_cast(ctx0,
++            ggml_clamp(ctx0, sel_f_hot, 0.0f, (float) (n_hot - 1)), GGML_TYPE_I32);
++        cb(selected_experts, "ffn_moe_topk_hot", il);
++
++        poe_sel_cold = ggml_cast(ctx0,
++            ggml_clamp(ctx0, ggml_scale_bias(ctx0, sel_f_cold, 1.0f, -(float) n_hot),
++                       0.0f, (float) (n_cold - 1)), GGML_TYPE_I32);
++        cb(poe_sel_cold, "ffn_moe_topk_cold", il);
++
++        // 1 where the slot is hot, 0 where it is cold: for integer ids,
++        // clamp(n_hot - id, 0, 1) is exactly that indicator
++        poe_hot_mask = ggml_clamp(ctx0,
++            ggml_scale_bias(ctx0, sel_f_mask, -1.0f, (float) n_hot), 0.0f, 1.0f);
++        poe_hot_mask = ggml_reshape_3d(ctx0, poe_hot_mask, 1, n_expert_used, n_tokens);
++        cb(poe_hot_mask, "ffn_moe_hot_mask", il);
++    }
++    if (poe_hot_only) {
++        const int64_t n_hot = down_exps->ne[2];
++        selected_experts = ggml_cast(ctx0,
++            ggml_clamp(ctx0, ggml_cast(ctx0, ggml_cont(ctx0, selected_experts),
++                                       GGML_TYPE_F32),
++                       0.0f, (float) (n_hot - 1)), GGML_TYPE_I32);
++        cb(selected_experts, "ffn_moe_topk_hot_only", il);
++    }
++    ggml_tensor * poe_moe_in = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
++
++    cur = poe_moe_in;
+ 
+     if (weight_before_ffn) {
+         // repeat cur to [n_embd, n_expert_used, n_tokens]
+@@ -2086,6 +2185,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+ 
+     ggml_tensor * up = nullptr;
+     ggml_tensor * experts = nullptr;
++    ggml_tensor * poe_experts_hot = nullptr;
++
++    for (int poe_pass = 0; poe_pass < (poe_split ? 2 : 1); ++poe_pass) {
++    if (poe_pass == 1) {
++        cur              = poe_moe_in;
++        up_exps          = up_exps_cold;
++        gate_exps        = gate_exps_cold;
++        down_exps        = down_exps_cold;
++        gate_up_exps     = nullptr;
++        selected_experts = poe_sel_cold;
++    }
+ 
+     if (gate_up_exps) {
+         // merged gate_up path: one mul_mat_id, then split into gate and up views
+@@ -2222,6 +2332,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(experts, "ffn_moe_down_biased", il);
+     }
+ 
++    if (poe_split) {
++        if (poe_pass == 0) {
++            poe_experts_hot = experts;
++        } else {
++            // merge per slot: the hot result where the router chose a hot
++            // expert, the cold one everywhere else
++            experts = ggml_add(ctx0,
++                ggml_mul(ctx0, poe_experts_hot, poe_hot_mask),
++                ggml_mul(ctx0, experts,
++                         ggml_scale_bias(ctx0, poe_hot_mask, -1.0f, 1.0f)));
++            cb(experts, "ffn_moe_merged", il);
++        }
++    }
++    } /* poe_pass */
++
+     if (!weight_before_ffn) {
+         experts = ggml_mul(ctx0, experts, weights);
+         cb(experts, "ffn_moe_weighted", il);
+@@ -2233,8 +2358,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+ 
+     assert(n_expert_used > 0);
+ 
++    // POE R7: honour the per-layer budget here too. Upstream bounds these
++    // loops by hparams.n_expert_used to cap add nodes during warmup (when the
++    // local count can be larger); a per-layer budget makes it smaller, so the
++    // correct bound is the minimum of the two.
++    const uint32_t n_expert_agg = (uint32_t) (n_expert_used < (int64_t) hparams.n_expert_used
++                                              ? n_expert_used : (int64_t) hparams.n_expert_used);
++
+     // order the views before the adds
+-    for (uint32_t i = 0; i < hparams.n_expert_used; ++i) {
++    for (uint32_t i = 0; i < n_expert_agg; ++i) {
+         cur_experts[i] = ggml_view_2d(ctx0, experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1]);
+ 
+         ggml_build_forward_expand(gf, cur_experts[i]);
+@@ -2246,13 +2378,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     //       ref: https://github.com/ggml-org/llama.cpp/pull/14753
+     ggml_tensor * moe_out = cur_experts[0];
+ 
+-    for (uint32_t i = 1; i < hparams.n_expert_used; ++i) {
++    for (uint32_t i = 1; i < n_expert_agg; ++i) {
+         moe_out = ggml_add(ctx0, moe_out, cur_experts[i]);
+ 
+         ggml_build_forward_expand(gf, moe_out);
+     }
+ 
+-    if (hparams.n_expert_used == 1) {
++    if (n_expert_agg == 1) {
+         // avoid returning a non-contiguous tensor
+         moe_out = ggml_cont(ctx0, moe_out);
+     }
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 32d8d39..208e19e 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -1081,7 +1081,10 @@ struct llm_graph_context {
+              ggml_tensor * up_exps_s = nullptr,
+              ggml_tensor * gate_exps_s = nullptr,
+              ggml_tensor * down_exps_s = nullptr,
+-             ggml_tensor * selected_experts_in = nullptr) const;
++             ggml_tensor * selected_experts_in = nullptr,
++             ggml_tensor * up_exps_cold = nullptr,
++             ggml_tensor * gate_exps_cold = nullptr,
++             ggml_tensor * down_exps_cold = nullptr) const;
+ 
+     ggml_tensor * build_moe_ffn(
+              ggml_tensor * cur,
+@@ -1107,7 +1110,10 @@ struct llm_graph_context {
+              ggml_tensor * up_exps_s = nullptr,
+              ggml_tensor * gate_exps_s = nullptr,
+              ggml_tensor * down_exps_s = nullptr,
+-             ggml_tensor * selected_experts_in = nullptr) const;
++             ggml_tensor * selected_experts_in = nullptr,
++             ggml_tensor * up_exps_cold = nullptr,
++             ggml_tensor * gate_exps_cold = nullptr,
++             ggml_tensor * down_exps_cold = nullptr) const;
+ 
+     //
+     // inputs
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 6b9e94a..42fe857 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -302,6 +302,11 @@ struct llama_layer {
+     struct ggml_tensor * ffn_gate_inp      = nullptr;
+     struct ggml_tensor * ffn_gate_inp_s    = nullptr; // gemma4
+     struct ggml_tensor * ffn_gate_exps     = nullptr;
++    // POE split: the experts a workload needs least, stored apart at a
++    // lower precision. Present only in checkpoints written by poe split.
++    struct ggml_tensor * ffn_gate_exps_cold = nullptr;
++    struct ggml_tensor * ffn_up_exps_cold   = nullptr;
++    struct ggml_tensor * ffn_down_exps_cold = nullptr;
+     struct ggml_tensor * ffn_down_exps     = nullptr;
+     struct ggml_tensor * ffn_up_exps       = nullptr;
+     struct ggml_tensor * ffn_gate_up_exps  = nullptr;
+diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
+index 38f2a57..79c149e 100644
+--- a/src/models/qwen35moe.cpp
++++ b/src/models/qwen35moe.cpp
+@@ -97,8 +97,23 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
+ 
+         // Routed experts
+         layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, flags);
+-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, flags);
+-        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, flags);
++        // POE split: a checkpoint from `poe split` stores the hot experts in
++        // the usual tensors and the rest in a second, lower-precision one.
++        // poe.split.hot_count says where the line is; without it the layout
++        // is the stock one and nothing below fires.
++        uint32_t n_expert_hot = 0;
++        ml.get_key(std::string("poe.split.hot_count"), n_expert_hot, false);
++        const int64_t n_expert_wide = n_expert_hot ? (int64_t) n_expert_hot : n_expert;
++        const int64_t n_expert_cold = n_expert - n_expert_wide;
++
++        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert_wide }, flags);
++        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert_wide, flags);
++
++        if (n_expert_cold > 0) {
++            layer.ffn_gate_exps_cold = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS_COLD, "weight", il), { n_embd, n_ff_exp, n_expert_cold }, flags);
++            layer.ffn_up_exps_cold   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS_COLD,   "weight", il), { n_embd, n_ff_exp, n_expert_cold }, flags);
++            layer.ffn_down_exps_cold = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_COLD, "weight", il), { n_ff_exp, n_embd, n_expert_cold }, flags);
++        }
+ 
+         // Shared experts
+         layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", il), { n_embd }, flags);
+@@ -512,7 +527,11 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_ffn(ggml_tensor * cur, c
+             nullptr, model.layers[il].ffn_gate_up_exps,
+             model.layers[il].ffn_up_exps_s,
+             model.layers[il].ffn_gate_exps_s,
+-            model.layers[il].ffn_down_exps_s);
++            model.layers[il].ffn_down_exps_s,
++            nullptr,
++            model.layers[il].ffn_up_exps_cold,
++            model.layers[il].ffn_gate_exps_cold,
++            model.layers[il].ffn_down_exps_cold);
+     cb(moe_out, "ffn_moe_out", il);
+ 
+     // Add shared experts if present - following Qwen3Next reference implementation

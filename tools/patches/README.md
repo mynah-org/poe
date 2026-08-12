@@ -58,3 +58,64 @@ known `--override-kv expert_used_count=6` result: the buggy build returned
 KLD 2.72 where the reference is 0.028, and crashed `llama-bench`. **Always
 validate a routing patch against a configuration whose answer is already
 known** — the model keeps generating fluent text either way.
+
+## `split-experts.patch` — per-expert precision (M9b), CPU-correct, CUDA open
+
+Consumes a checkpoint from `poe split`: routed experts stored as a hot tensor
+and a cold tensor at different precisions, reordered so the hot ones come
+first with the router's rows permuted to match. Expert id keeps meaning "row
+of the router", so `id < poe.split.hot_count` decides which tensor a slot
+belongs to — no remap table.
+
+The graph runs both halves over every slot and merges per slot, so routing
+stays exactly what the router chose. Ids for each half come from clamping the
+router's own selection (`clamp(id, 0, n_hot-1)` and `clamp(id - n_hot, 0,
+n_cold-1)`), and the merge weight is `clamp(n_hot - id, 0, 1)` — for integer
+ids that is exactly the "is this slot hot" indicator, with no extra tensors.
+
+```sh
+cd llama.cpp                     # generated against b1-69bf643
+git apply /path/to/poe/tools/patches/split-experts.patch
+cmake --build build -j
+```
+
+### State: correct on CPU, crashes on CUDA
+
+**CPU is validated.** With `CUDA_VISIBLE_DEVICES=""` the split checkpoint
+loads and scores a sane perplexity (1.6442 on the first code chunk), so the
+format, the loading, the clamped ids and the per-slot merge are right.
+
+**CUDA fails with an illegal memory access**, and it is localized:
+
+```
+Invalid __global__ write of size 4 bytes
+  at quantize_mmq_q8_1<(mmq_q8_1_ds_layout)1, (bool)1>(const float *, const int *, ...)
+  Access to 0xffffffdabafceba0 is out of bounds
+```
+
+That is the MMQ activation quantizer in its *with-ids* form, writing at a
+sign-extended negative offset — it is receiving garbage ids, not the clamped
+ones. Ruled out by experiment, in this order:
+
+- the topk-moe fusion (`GGML_CUDA_DISABLE_FUSION=1` still crashes);
+- CUDA graphs (`GGML_CUDA_DISABLE_GRAPHS=1`), and batch size (`-b/-ub 128`);
+- the cold half and the merge — `POE_SPLIT_PASSES=1` runs only the hot half,
+  with clamped ids and no merge, and still crashes;
+- non-contiguous ids — `ggml_cont` before the cast, no change;
+- three chains sharing one f32 buffer. **This one was a real bug**:
+  `ggml_clamp` is in-place and returns a view of its input (`ggml.h`), so the
+  hot ids, cold ids and mask must each start from their own cast. Fixed, but
+  it was not the crash;
+- MMQ versus cuBLAS selection (`GGML_CUDA_FORCE_CUBLAS=1` still crashes).
+
+**The remaining suspect** is the ids tensor's provenance: `mul_mat_id` on
+CUDA normally receives the argsort *view*, and this patch hands it a derived
+tensor (cast → clamp → cast). Something on that path — most likely the
+`mmq_ids_helper` mapping — depends on the layout or stride of the tensor it
+is given. The next step is to compare `ne`/`nb`/buffer of the stock ids
+against the derived one at graph-build time, or to produce the clamped ids
+with an op the CUDA path already handles rather than a cast chain.
+
+`POE_SPLIT_PASSES=1` is left in deliberately: it is what turned "the split
+crashes" into "the hot half alone crashes", which is half the search space
+in one run.
