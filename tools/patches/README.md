@@ -94,35 +94,40 @@ Invalid __global__ write of size 4 bytes
 ```
 
 That is the MMQ activation quantizer in its *with-ids* form, writing at a
-sign-extended negative offset — it is receiving garbage ids, not the clamped
-ones. Ruled out by experiment, in this order:
+sign-extended negative offset. Everything below was ruled out by experiment,
+each one a build and a run:
 
-- the topk-moe fusion (`GGML_CUDA_DISABLE_FUSION=1` still crashes);
-- CUDA graphs (`GGML_CUDA_DISABLE_GRAPHS=1`), and batch size (`-b/-ub 128`);
-- the cold half and the merge — `POE_SPLIT_PASSES=1` runs only the hot half,
-  with clamped ids and no merge, and still crashes;
-- non-contiguous ids — `ggml_cont` before the cast, no change;
-- three chains sharing one f32 buffer. **This one was a real bug**:
-  `ggml_clamp` is in-place and returns a view of its input (`ggml.h`), so the
-  hot ids, cold ids and mask must each start from their own cast. Fixed, but
-  it was not the crash;
-- MMQ versus cuBLAS selection (`GGML_CUDA_FORCE_CUBLAS=1` still crashes).
+| Ruled out | How |
+|---|---|
+| topk-moe fusion | `GGML_CUDA_DISABLE_FUSION=1` still crashes |
+| CUDA graphs, batch size | `GGML_CUDA_DISABLE_GRAPHS=1`, `-b/-ub 128` |
+| the cold half and the merge | `POE_SPLIT_PASSES=1` (hot half alone) crashes |
+| non-contiguous ids | `ggml_cont` before the cast — no change |
+| ids stride/layout | ids rebuilt as a full-width view with the stock `nb[1]` |
+| **id values out of range** | `POE_ZERO_IDS=1` sends every slot to expert 0 — still crashes |
+| degenerate id distribution | placeholders spread across the half instead of piled on one expert |
+| MMQ versus cuBLAS | `GGML_CUDA_FORCE_CUBLAS=1` still crashes |
+| **the patch breaking the normal path** | the same build scores a normal model fine: `[1]1.6840,[2]1.7739` |
 
-**The remaining suspect, stated precisely so the next attempt starts here.**
-`mul_mat_id` on CUDA normally receives the argsort *view*, whose rows are
-strided by the full expert count: `nb[1] = n_expert * 4`. This patch hands it
-a compact tensor instead, `nb[1] = n_expert_used * 4` — same values, eight
-times narrower rows. If anything in the MMQ ids path assumes the stock
-stride (or derives a row count from `nb[1]`), it walks off the 16 KB ids
-buffer into uninitialized memory, which is exactly what a sign-extended
-negative id looks like. The CPU path uses `nb` correctly, which is why it
-works there and only there.
+One real bug was found and fixed on the way: `ggml_clamp` is in-place and
+returns a view of its input (`ggml.h` says so), so the hot ids, cold ids and
+mask each need their own cast of the selection — sharing one buffer made the
+clamps race, which CPU graph order hides.
 
-Two ways to test it, cheapest first: print `ne`/`nb` of the stock ids and of
-the derived one at graph-build time and compare; then, if they differ as
-predicted, hand `mul_mat_id` a *view* with the stock stride — clamp into a
-full-width `[n_expert, n_tokens]` buffer and view its first `n_expert_used`
-rows — rather than a compact tensor.
+**What the eliminations leave.** CPU + split works, CUDA + unsplit works,
+CUDA + split fails *even when every id is zero*. The only invariant across
+all failing configurations is a `mul_mat_id` whose `src0->ne[2]` is 111 while
+the model's `n_expert` is 256 — a shape stock llama.cpp never produces, since
+its expert tensors always carry the full expert count.
+
+Since in-range ids do not help, the ids the kernel reads are probably not the
+ids the graph computes: the derived tensor's device buffer may simply never
+be written. **The next step is therefore to observe, not to guess**: dump the
+ids at compute time with a `ggml_backend_sched_eval_callback` (or
+`GGML_SCHED_DEBUG=2`) and compare what `mm_ids_helper` receives against what
+the graph built. `ggml/src/ggml-cuda/mmq.cu:183-201` is where they meet —
+`expert_bounds` is sized `ne02 + 1` and the helper is handed `ids->data`
+directly.
 
 `POE_SPLIT_PASSES=1` is left in deliberately: it is what turned "the split
 crashes" into "the hot half alone crashes", which is half the search space
