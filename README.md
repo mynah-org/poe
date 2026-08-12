@@ -39,6 +39,9 @@ Routing-budget measurements (what lowering top-k costs, and why per-layer
 schedules do not pay): [docs/routing-experiments.md](docs/routing-experiments.md).
 Mixed precision per expert slab, and why uniform allocation won:
 [docs/mixed-precision.md](docs/mixed-precision.md).
+Quantization versus expert deletion at equal bytes — a coin flip in the
+calibration domain, 7× worse outside it:
+[docs/quant-vs-prune.md](docs/quant-vs-prune.md).
 
 ## Build
 
