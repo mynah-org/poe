@@ -38,6 +38,9 @@ static const char USAGE[] =
 "                  (--profile <p[:W]>... |           (profile) -> plan -> apply -> verify,\n"
 "                   --dataset <text>)                intermediate artifacts preserved\n"
 "                  [--method M] [--prune P]\n"
+"  split           <model.gguf> -o <out.gguf>         hot and cold experts at two\n"
+"                  --profile <p> --hot-type T        precisions, as two tensors per\n"
+"                  --cold-type T [--hot-frac F]      slab (needs a patched runtime)\n"
 "  requant         <model.gguf> -o <out.gguf>         per-expert precision, emulated\n"
 "                  --carrier T --degrade-type T      inside one type: same file size,\n"
 "                  [--degrade-frac F --profile <p>]  the damage aimed at cold experts\n"
@@ -79,6 +82,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "apply")    == 0) return poe_cmd_apply(sub_argc, sub_argv);
     if (strcmp(cmd, "forge")    == 0) return poe_cmd_forge(sub_argc, sub_argv);
     if (strcmp(cmd, "requant")  == 0) return poe_cmd_requant(sub_argc, sub_argv);
+    if (strcmp(cmd, "split")    == 0) return poe_cmd_split(sub_argc, sub_argv);
     if (strcmp(cmd, "validate") == 0) return poe_cmd_validate(sub_argc, sub_argv);
 
     if (strcmp(cmd, "profile")  == 0) {

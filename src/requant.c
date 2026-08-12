@@ -10,6 +10,7 @@
 
 #include "ingot.h"
 #include "ggufw.h"
+#include "poe/rank.h"
 
 /* One thread's share of a slab: a contiguous range of experts, degraded if
  * cold and then encoded at the carrier. Experts are the natural unit —
@@ -84,41 +85,24 @@ static const poe_block *slab_owner(const poe_model *m, const ingot_tensor *t) {
     return NULL;
 }
 
-typedef struct { double score; uint32_t idx; } ranked;
-
-static int cmp_score_asc(const void *a, const void *b) {
-    const double x = ((const ranked *)a)->score, y = ((const ranked *)b)->score;
-    if (x < y) return -1;
-    if (x > y) return 1;
-    /* ties resolve by index, so the same profile always yields the same set */
-    return (int)((const ranked *)a)->idx - (int)((const ranked *)b)->idx;
-}
-
-/* Mark the experts to degrade, per layer. Within a layer, selection counts
- * are a usable ranking — unlike summed over a layer, where they are
- * tokens x top_k by construction and rank nothing. REAP saliency is
- * preferred when the profile carries it. */
+/* Mark the experts to degrade, per layer, using the shared ranking. */
 static int mark_cold(uint8_t *cold, const poe_profile *pr, uint32_t L,
                      uint32_t E, uint32_t n_cold, int invert, int want_counts,
                      int *by_reap) {
-    ranked *r = malloc(E * sizeof *r);
-    if (r == NULL) return -1;
-    *by_reap = !want_counts && pr != NULL && pr->reap_mean != NULL;
+    uint32_t *order = malloc((size_t)E * sizeof *order);
+    if (order == NULL) return -1;
     for (uint32_t l = 0; l < L; l++) {
-        for (uint32_t e = 0; e < E; e++) {
-            const size_t k = (size_t)l * E + e;
-            r[e].idx = e;
-            r[e].score = *by_reap ? pr->reap_mean[k]
-                                  : (double)pr->sel_count[k];
-        }
-        qsort(r, E, sizeof *r, cmp_score_asc);
-        /* ascending: the coldest are first, unless the control flips it */
-        for (uint32_t i = 0; i < n_cold; i++) {
-            const uint32_t e = invert ? r[E - 1 - i].idx : r[i].idx;
-            cold[(size_t)l * E + e] = 1;
-        }
+        const int used = poe_rank_experts(pr, l, E,
+                                          want_counts ? POE_RANK_COUNTS
+                                                      : POE_RANK_REAP, order);
+        if (used < 0) { free(order); return -1; }
+        *by_reap = used;
+        /* order is hottest-first: the cold set is its tail, and the control
+         * takes the head instead */
+        for (uint32_t i = 0; i < n_cold; i++)
+            cold[(size_t)l * E + order[invert ? i : E - 1 - i]] = 1;
     }
-    free(r);
+    free(order);
     return 0;
 }
 
