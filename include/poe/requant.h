@@ -47,6 +47,13 @@ typedef struct {
     int    invert;              /* degrade the HOTTEST experts instead       */
     int    force;               /* accept a profile from another checkpoint  */
     int    threads;             /* 0 = one per online core                   */
+
+    /* Which signal decides an expert is cold. REAP saliency measures an
+     * expert's contribution to the layer output — the right question for
+     * deletion. The M9 thesis is narrower and literal: *the experts a
+     * workload never routes to*, which is selection frequency. They are not
+     * the same ordering, and testing only one under-tests the thesis. */
+    int    rank_by_counts;      /* 0 = REAP when available, 1 = frequency    */
 } poe_requant_opts;
 
 typedef struct {

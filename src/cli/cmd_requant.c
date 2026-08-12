@@ -33,7 +33,7 @@ int poe_cmd_requant(int argc, char **argv) {
     const char *model_path = NULL, *out_path = NULL, *profile_path = NULL;
     const char *carrier_arg = NULL, *degrade_arg = NULL;
     double frac = 1.0;
-    int invert = 0, force = 0, threads = 0;
+    int invert = 0, force = 0, threads = 0, by_counts = 0;
 
     for (int i = 0; i < argc; i++) {
         if      (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
@@ -46,6 +46,13 @@ int poe_cmd_requant(int argc, char **argv) {
         }
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc)
             threads = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--rank") == 0 && i + 1 < argc) {
+            const char *v = argv[++i];
+            if      (strcmp(v, "counts") == 0) by_counts = 1;
+            else if (strcmp(v, "reap")   == 0) by_counts = 0;
+            else { fprintf(stderr, "poe requant: --rank must be "
+                                   "'reap' or 'counts'\n"); return 2; }
+        }
         else if (strcmp(argv[i], "--invert") == 0) invert = 1;
         else if (strcmp(argv[i], "--force") == 0) force = 1;
         else if (argv[i][0] == '-') {
@@ -68,6 +75,9 @@ int poe_cmd_requant(int argc, char **argv) {
             "  --degrade-frac   how many experts per layer are degraded (default 1,\n"
             "                   i.e. all of them — the matched-bytes control)\n"
             "  --profile        ranks experts within each layer; required below 1\n"
+            "  --rank           reap (default) or counts: contribution to the\n"
+            "                   layer output, or how often the workload routes\n"
+            "                   there at all — not the same ordering\n"
             "  --threads N      encoder threads (default: one per core)\n"
             "  --invert         degrade the HOTTEST experts: the control an\n"
             "                   experiment needs, never something to ship\n"
@@ -77,7 +87,8 @@ int poe_cmd_requant(int argc, char **argv) {
         return 2;
     }
 
-    poe_requant_opts o = { 0, 0, frac, NULL, invert, force, threads };
+    poe_requant_opts o = { 0, 0, frac, NULL, invert, force, threads,
+                           by_counts };
     o.carrier_type = type_by_name(carrier_arg);
     o.degrade_type = type_by_name(degrade_arg);
     if (o.carrier_type < 0 || o.degrade_type < 0) {
@@ -121,7 +132,7 @@ int poe_cmd_requant(int argc, char **argv) {
            o.invert ? "   (INVERTED: the hottest)" : "");
     if (st.degraded_per_layer < m->expert_count)
         printf("ranked by %s\n", st.ranked_by_reap ? "REAP saliency"
-                                                   : "selection counts");
+                                                   : "selection frequency");
     printf("emulates  %.4f bits/weight over the routed slabs\n",
            st.emulated_bits);
     printf("\nwrote %s   %s   (%u slabs rewritten, %llu experts degraded, "

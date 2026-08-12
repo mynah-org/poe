@@ -99,10 +99,11 @@ static int cmp_score_asc(const void *a, const void *b) {
  * tokens x top_k by construction and rank nothing. REAP saliency is
  * preferred when the profile carries it. */
 static int mark_cold(uint8_t *cold, const poe_profile *pr, uint32_t L,
-                     uint32_t E, uint32_t n_cold, int invert, int *by_reap) {
+                     uint32_t E, uint32_t n_cold, int invert, int want_counts,
+                     int *by_reap) {
     ranked *r = malloc(E * sizeof *r);
     if (r == NULL) return -1;
-    *by_reap = pr != NULL && pr->reap_mean != NULL;
+    *by_reap = !want_counts && pr != NULL && pr->reap_mean != NULL;
     for (uint32_t l = 0; l < L; l++) {
         for (uint32_t e = 0; e < E; e++) {
             const size_t k = (size_t)l * E + e;
@@ -150,6 +151,10 @@ int poe_requant(const poe_model *m, const poe_requant_opts *o,
     if (n_cold < E && o->profile == NULL)
         return fail(err, errsz, "ranking experts needs a profile "
                                 "(or degrade every expert with a fraction of 1)");
+    if (n_cold < E && o->rank_by_counts && o->profile != NULL &&
+        o->profile->sel_count == NULL)
+        return fail(err, errsz, "the profile carries no selection counts to "
+                                "rank by");
     if (o->profile != NULL) {
         if (o->profile->n_layers != L || o->profile->n_experts != E)
             return fail(err, errsz, "profile shape does not match the model");
@@ -228,7 +233,7 @@ int poe_requant(const poe_model *m, const poe_requant_opts *o,
         memset(cold, 1, (size_t)L * E);
         st.ranked_by_reap = 0;
     } else if (mark_cold(cold, o->profile, L, E, n_cold, o->invert,
-                         &st.ranked_by_reap) != 0) {
+                         o->rank_by_counts, &st.ranked_by_reap) != 0) {
         free(owner); free(cold);
         return fail(err, errsz, "out of memory");
     }

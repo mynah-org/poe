@@ -63,7 +63,88 @@ static int expert_error(const poe_model *src, const poe_model *out,
     return 0;
 }
 
+/* The assumption the whole emulation rests on: once values sit on the
+ * carrier's grid, encoding them at the carrier again costs (almost) nothing.
+ * If it did not, every arm would be paying an unknown second tax and the
+ * comparison between them would mean nothing. Measured here rather than
+ * asserted, on the bell-shaped distribution a weight matrix actually has. */
+static double rel_l2(const float *a, const float *b, size_t n) {
+    double num = 0, den = 0;
+    for (size_t i = 0; i < n; i++) {
+        const double d = (double)a[i] - (double)b[i];
+        num += d * d;
+        den += (double)a[i] * (double)a[i];
+    }
+    return den > 0 ? sqrt(num / den) : 0.0;
+}
+
+static void check_carrier_idempotence(void) {
+    enum { N = 4096 };
+    float *x  = malloc(N * sizeof *x);
+    float *r1 = malloc(N * sizeof *r1);
+    float *r2 = malloc(N * sizeof *r2);
+    uint8_t *q = malloc(N);            /* Q4_K is 4.5 bits: N bytes is ample */
+    if (!x || !r1 || !r2 || !q) { free(x); free(r1); free(r2); free(q); return; }
+
+    uint32_t s = 12345u;
+    for (size_t i = 0; i < N; i++) {   /* sum of uniforms ~ bell shaped */
+        double v = 0;
+        for (int k = 0; k < 6; k++) {
+            s = s * 1664525u + 1013904223u;
+            v += (double)(int32_t)s / 2147483648.0;
+        }
+        x[i] = (float)(v / 6.0);
+    }
+
+    if (ingot_quantize(INGOT_TYPE_Q4_K, x, N, q) == 0 &&
+        ingot_dequant(INGOT_TYPE_Q4_K, q, N, r1) == 0 &&
+        ingot_quantize(INGOT_TYPE_Q4_K, r1, N, q) == 0 &&
+        ingot_dequant(INGOT_TYPE_Q4_K, q, N, r2) == 0) {
+        const double first  = rel_l2(x, r1, N);
+        const double second = rel_l2(r1, r2, N);
+        CHECK(first > 0.01, "one Q4_K round trip costs rel L2 %.4f", first);
+        CHECK(second < first / 10.0,
+              "a second round trip adds %.5f, an order of magnitude less "
+              "— the carrier pass is near-idempotent", second);
+    } else {
+        printf("  FAIL: cannot run the carrier round trip\n");
+        failures++;
+    }
+
+    /* And the tax the emulation actually charges: storing a hard-quantized
+     * signal at the carrier instead of at the hard type. If that were large,
+     * an emulated arm would not stand in for the real allocation. */
+    const int hard[2] = { INGOT_TYPE_Q3_K, INGOT_TYPE_Q2_K };
+    for (int h = 0; h < 2; h++) {
+        if (ingot_quantize(hard[h], x, N, q) != 0 ||
+            ingot_dequant(hard[h], q, N, r1) != 0 ||
+            ingot_quantize(INGOT_TYPE_Q4_K, r1, N, q) != 0 ||
+            ingot_dequant(INGOT_TYPE_Q4_K, q, N, r2) != 0) {
+            printf("  FAIL: cannot run the %s emulation path\n",
+                   ingot_type_name(hard[h]));
+            failures++;
+            continue;
+        }
+        const double direct   = rel_l2(x, r1, N);
+        const double emulated = rel_l2(x, r2, N);
+        /* The tax is small but NOT equal across types — measured here at
+         * +7% for Q3_K and +2% for Q2_K — so an arm that degrades everything
+         * to Q3_K pays more of it than one that degrades some experts to
+         * Q2_K. That is why the inverted control, which carries exactly the
+         * same tax as the arm under test, is the comparison that decides,
+         * and the uniform arm is a practical baseline rather than a clean
+         * one. Bounded, reported, and never assumed to be zero. */
+        CHECK(emulated <= direct * 1.10,
+              "%s emulated through the carrier costs %.4f against %.4f "
+              "stored directly (+%.1f%%)", ingot_type_name(hard[h]),
+              emulated, direct, 100.0 * (emulated / direct - 1.0));
+    }
+    free(x); free(r1); free(r2); free(q);
+}
+
 int main(void) {
+    check_carrier_idempotence();
+
     const char *src_path = "build/fixture-wide.gguf";
     const char *uni_path = "build/rq-uniform.gguf";
     const char *pe_path  = "build/rq-perexpert.gguf";
@@ -98,7 +179,11 @@ int main(void) {
         }
 
     /* ── the control: every expert degraded through the same type ─────── */
-    poe_requant_opts uni = { INGOT_TYPE_Q4_K, INGOT_TYPE_Q3_K, 1.0, NULL, 0, 0, 0 };
+    poe_requant_opts uni;
+    memset(&uni, 0, sizeof uni);
+    uni.carrier_type = INGOT_TYPE_Q4_K;
+    uni.degrade_type = INGOT_TYPE_Q3_K;
+    uni.degrade_fraction = 1.0;
     poe_requant_stats su;
     CHECK(poe_requant(src, &uni, uni_path, &su, err, sizeof err) == 0,
           "uniform arm written (%s)", err[0] ? err : "ok");
@@ -111,7 +196,12 @@ int main(void) {
           "the control emulates %.4f bits/weight", su.emulated_bits);
 
     /* ── the arm under test: half the experts, hard ────────────────────── */
-    poe_requant_opts pe = { INGOT_TYPE_Q4_K, INGOT_TYPE_Q2_K, 0.5, &pr, 0, 0, 0 };
+    poe_requant_opts pe;
+    memset(&pe, 0, sizeof pe);
+    pe.carrier_type = INGOT_TYPE_Q4_K;
+    pe.degrade_type = INGOT_TYPE_Q2_K;
+    pe.degrade_fraction = 0.5;
+    pe.profile = &pr;
     poe_requant_stats sp;
     CHECK(poe_requant(src, &pe, pe_path, &sp, err, sizeof err) == 0,
           "per-expert arm written (%s)", err[0] ? err : "ok");
@@ -169,6 +259,56 @@ int main(void) {
     free(e_pe); free(e_iv);
     poe_model_close(mo);
     poe_model_close(mi);
+
+    /* ── the two rankings are not the same ordering ────────────────────── */
+    {
+        /* saliency says expert e is worth e+1; frequency says the opposite,
+         * so the two cold sets must be complements of each other */
+        for (uint32_t l = 0; l < L; l++)
+            for (uint32_t e = 0; e < E; e++)
+                pr.sel_count[(size_t)l * E + e] = E - e;
+
+        poe_requant_opts byc = pe;
+        byc.rank_by_counts = 1;
+        poe_requant_stats sc;
+        const char *pc = "build/rq-counts.gguf";
+        CHECK(poe_requant(src, &byc, pc, &sc, err, sizeof err) == 0,
+              "frequency-ranked arm written (%s)", err[0] ? err : "ok");
+        CHECK(!sc.ranked_by_reap,
+              "--rank counts uses frequency even when REAP data is present");
+
+        poe_model *mc = NULL;
+        double *e_c = malloc(E * sizeof *e_c);
+        if (e_c != NULL && poe_model_open(&mc, pc, err, sizeof err) == 0 &&
+            expert_error(src, mc, "blk.0.ffn_gate_exps.weight", E, e_c) == 0) {
+            /* frequency is E-e, so the cold half is now the TOP half */
+            double hot_half = 0, cold_half = 1e30;
+            for (uint32_t e = 0; e < E; e++) {
+                if (e < E / 2) { if (e_c[e] > hot_half)   hot_half  = e_c[e]; }
+                else           { if (e_c[e] < cold_half)  cold_half = e_c[e]; }
+            }
+            CHECK(cold_half > hot_half,
+                  "the frequency ranking picked the other half (%.3e vs %.3e)",
+                  cold_half, hot_half);
+        } else {
+            printf("  FAIL: cannot reopen the frequency-ranked arm\n");
+            failures++;
+        }
+        free(e_c);
+        poe_model_close(mc);
+        remove(pc);
+
+        /* a profile with no counts cannot be ranked by them */
+        poe_profile nocounts = pr;
+        nocounts.sel_count = NULL;
+        poe_requant_opts bad_rank = byc;
+        bad_rank.profile = &nocounts;
+        poe_requant_stats sbr;
+        err[0] = '\0';
+        CHECK(poe_requant(src, &bad_rank, "build/rq-bad.gguf", &sbr,
+                          err, sizeof err) != 0,
+              "ranking by counts without counts is refused (%s)", err);
+    }
 
     /* Threading must not change a single byte: experts are encoded
      * independently either way, so one thread and four have to agree. */
