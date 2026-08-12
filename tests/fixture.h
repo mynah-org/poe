@@ -23,10 +23,18 @@
 #define POE_FIX_EXPERTS 8u
 #define POE_FIX_TOPK    2u
 
+/* A second MoE geometry with rows wide enough to hold K-quant blocks (256
+ * elements), for anything that re-encodes expert weights. */
+#define POE_FIX_WIDE_BLOCKS  2u
+#define POE_FIX_WIDE_EMBD    256u
+#define POE_FIX_WIDE_FF      256u
+#define POE_FIX_WIDE_EXPERTS 4u
+
 /* Write the fixtures. `seed` perturbs the tensor payloads (same structure,
  * different weights) — two files from the same seed are byte-identical.
  * Return 0 on success, -1 with a message in err. */
 int poe_fixture_moe(const char *path, uint32_t seed, char *err, size_t errsz);
+int poe_fixture_moe_wide(const char *path, uint32_t seed, char *err, size_t errsz);
 int poe_fixture_dense(const char *path, char *err, size_t errsz);
 
 #endif

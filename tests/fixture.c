@@ -43,7 +43,13 @@ static int add_f32(ingot_gguf_writer *w, arena *a, const char *name,
                                  arr(a, nelem, seed));
 }
 
-int poe_fixture_moe(const char *path, uint32_t seed, char *err, size_t errsz) {
+/* One builder for both MoE fixtures. The wide one exists because K-quant
+ * rows must be a whole number of 256-element blocks: the small fixture's
+ * 32-wide rows cannot hold a Q4_K tensor at all, so anything that
+ * re-encodes weights needs a model with realistic row widths. */
+static int moe_build(const char *path, uint32_t seed, uint32_t blocks,
+                     uint64_t embd, uint64_t ff, uint64_t nexp, uint32_t topk,
+                     const char *label, char *err, size_t errsz) {
     ingot_gguf_writer *w = ingot_gguf_writer_new();
     if (w == NULL) { snprintf(err, errsz, "writer alloc failed"); return -1; }
     arena a = { 0 };
@@ -51,15 +57,14 @@ int poe_fixture_moe(const char *path, uint32_t seed, char *err, size_t errsz) {
     char name[128];
 
     ingot_gguf_kv_string(w, "general.architecture", POE_FIX_ARCH);
-    ingot_gguf_kv_string(w, "general.name", "poe synthetic moe");
-    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".block_count",                POE_FIX_BLOCKS);
-    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".embedding_length",           POE_FIX_EMBD);
-    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".expert_count",               POE_FIX_EXPERTS);
-    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".expert_used_count",          POE_FIX_TOPK);
-    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".expert_feed_forward_length", POE_FIX_FF);
+    ingot_gguf_kv_string(w, "general.name", label);
+    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".block_count",                blocks);
+    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".embedding_length",           (uint32_t)embd);
+    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".expert_count",               (uint32_t)nexp);
+    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".expert_used_count",          topk);
+    ingot_gguf_kv_u32(w, POE_FIX_ARCH ".expert_feed_forward_length", (uint32_t)ff);
 
-    const uint64_t embd = POE_FIX_EMBD, vocab = POE_FIX_VOCAB,
-                   ff = POE_FIX_FF, nexp = POE_FIX_EXPERTS;
+    const uint64_t vocab = POE_FIX_VOCAB;
     uint32_t s = seed * 7919u;
 
     {
@@ -71,7 +76,7 @@ int poe_fixture_moe(const char *path, uint32_t seed, char *err, size_t errsz) {
         if (add_f32(w, &a, "output_norm.weight", 1, ne, s++) != 0) goto done;
     }
 
-    for (uint32_t b = 0; b < POE_FIX_BLOCKS; b++) {
+    for (uint32_t b = 0; b < blocks; b++) {
         uint64_t ne1[1]  = { embd };
         uint64_t neqq[2] = { embd, embd };
         uint64_t nert[2] = { embd, nexp };
@@ -107,6 +112,18 @@ done:
     ingot_gguf_writer_free(w);
     arena_free(&a);
     return rc;
+}
+
+int poe_fixture_moe(const char *path, uint32_t seed, char *err, size_t errsz) {
+    return moe_build(path, seed, POE_FIX_BLOCKS, POE_FIX_EMBD, POE_FIX_FF,
+                     POE_FIX_EXPERTS, POE_FIX_TOPK, "poe synthetic moe",
+                     err, errsz);
+}
+
+int poe_fixture_moe_wide(const char *path, uint32_t seed, char *err, size_t errsz) {
+    return moe_build(path, seed, POE_FIX_WIDE_BLOCKS, POE_FIX_WIDE_EMBD,
+                     POE_FIX_WIDE_FF, POE_FIX_WIDE_EXPERTS, POE_FIX_TOPK,
+                     "poe synthetic moe (quantizable rows)", err, errsz);
 }
 
 int poe_fixture_dense(const char *path, char *err, size_t errsz) {
