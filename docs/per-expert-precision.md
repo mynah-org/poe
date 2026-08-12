@@ -213,8 +213,40 @@ arm above, holding the allocation that measured 2.4× better. The remaining
 touch non-expert tensors; quantizing those is a separate pass and a
 separate decision.
 
-What is missing is only the runtime: two `mul_mat_id` passes over the hot
-and cold tensors, selected by `id < poe.split.hot_count`. The checkpoint
-side is done, verified against a synthetic model down to "expert *i* of the
-output is expert *order[i]* of the source, and the router's rows moved with
-it".
+## Measured on the real artifact: the emulation was right to 0.2%
+
+With `tools/patches/split-experts.patch` applied, the split checkpoint runs
+on the GPU. KLD against the same Q8_0 source, on the same held-out C/C++,
+25 chunks × 512:
+
+| Checkpoint | bits/weight | KLD code | top-1 code |
+|---|---|---|---|
+| split, 111 hot Q4_K + 145 cold Q2_K | 3.4380 | **0.013304** ±0.00104 | 97.16% |
+| split, 128 hot + 128 cold | 3.5625 | 0.012701 ±0.00090 | 97.32% |
+
+The emulation predicted **0.013328** for exactly that first allocation. The
+artifact measures **0.013304** — a 0.2% difference, far inside the error
+bars. Everything the gate assumed is therefore confirmed by the thing it was
+predicting: the requant emulation is a faithful stand-in, the splitter
+writes what it claims, and the runtime's per-slot merge is exact.
+
+Against the uniform Q3_K arm at the same expert budget (0.031487, 100
+chunks), the shipped split checkpoint is **2.4× less damaging on the
+calibration domain** — the win M9a could not express and M9b now holds in a
+file that runs.
+
+### What it costs to run
+
+| | size | tg128 |
+|---|---|---|
+| split, 128/128 | **15.84 GiB** | **57.06 ± 0.21 t/s** |
+| the same model unsplit | 19.29 GiB | 66.51 ± 0.42 t/s |
+
+3.45 GiB smaller for 14.2% slower generation, against the 13.1% predicted
+by proxy before any of it was built.
+
+**One rough edge remains.** Prefill at a large micro-batch reaches MMQ's
+with-ids kernels and takes an illegal memory access; `-b 8 -ub 8` keeps
+`mul_mat_id` on `mul_mat_vec_q` and everything runs, and generation never
+reaches MMQ at all. The eliminations and the next step are in
+[tools/patches/README.md](../tools/patches/README.md).
