@@ -174,5 +174,47 @@ The variant that would cost nothing is a *fixed quota* — route the top few
 within the hot set and the rest within the cold set, keeping the total at
 eight expert evaluations. It buys the bytes for free but displaces some of
 the router's real choices, and how often it would do that is a property of
-the workload, not of the design. `poe split` reports it from the profile:
-the share of routed slots that land in the hot set.
+the workload, not of the design. `poe split` reports it from the profile,
+and on Qwen3.6 it refuses the design:
+
+```
+routing   69.1% of routed slots land in the hot set (per layer 48.8%-77.9%)
+```
+
+With 111 hot experts of 256, **31% of routed slots still land in the cold
+half**, and one layer sends more than half of its routing there. A fixed
+quota would displace the router's choice constantly, and the flat-router
+result explains why: probability mass is spread thin
+([routing experiments §R9](routing-experiments.md)), so "the experts this
+workload uses" is not a small set even after specialization.
+
+So the straightforward two-pass design is the honest one, and its price is
+the 13% above.
+
+## The artifact
+
+`poe split` produces it today:
+
+```
+$ poe split Qwen3.6-35B-A3B-Q8_0.gguf -o split.gguf \
+      --profile coding.poeprofile --hot-frac 0.4336 \
+      --hot-type q4_k --cold-type q2_k
+
+hot       Q4_K    4.5000 bits/weight   111 experts per layer
+cold      Q2_K    2.6250 bits/weight   145 experts per layer
+mean      3.4380 bits/weight over the routed experts
+120 slabs split, 40 router tensors permuted
+wrote split.gguf   15.4 GiB  (source 34.4 GiB, 44.8%)
+```
+
+12.9 GiB of that is experts — the same expert budget as the uniform Q3_K
+arm above, holding the allocation that measured 2.4× better. The remaining
+2.3 GiB is everything else, still at Q8_0 because the splitter does not
+touch non-expert tensors; quantizing those is a separate pass and a
+separate decision.
+
+What is missing is only the runtime: two `mul_mat_id` passes over the hot
+and cold tensors, selected by `id < poe.split.hot_count`. The checkpoint
+side is done, verified against a synthetic model down to "expert *i* of the
+output is expert *order[i]* of the source, and the router's rows moved with
+it".
