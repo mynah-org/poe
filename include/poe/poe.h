@@ -35,6 +35,17 @@ typedef struct {
     const ingot_tensor *gate_exps_w;   /* packed [embd, ff, n_expert]        */
     const ingot_tensor *up_exps_w;
     const ingot_tensor *down_exps_w;   /* packed [ff, embd, n_expert]        */
+
+    /* A split checkpoint (poe split) stores the experts a workload needs
+     * least in a second tensor at a lower precision. They are routed
+     * experts like any other and are counted as such; `is_split` says the
+     * layer carries them, and expert_count is hot + cold. */
+    const ingot_tensor *gate_exps_cold_w;
+    const ingot_tensor *up_exps_cold_w;
+    const ingot_tensor *down_exps_cold_w;
+    int      is_split;
+    uint32_t hot_expert_count;         /* experts in the wide tensor         */
+    uint32_t cold_expert_count;        /* experts in the low-precision one   */
     const ingot_tensor *gate_exps_b;   /* per-expert biases (gpt-oss style)  */
     const ingot_tensor *up_exps_b;
     const ingot_tensor *down_exps_b;

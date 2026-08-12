@@ -52,6 +52,14 @@ static void print_human(const poe_model *m, const char *path) {
         if (blk->gate_exps_w) {
             printf("  expert quantization   %s\n",
                    ingot_type_name(blk->gate_exps_w->type));
+            /* a split checkpoint carries two precisions per layer; saying so
+             * here keeps "expert quantization" from being a half-truth */
+            if (blk->is_split && blk->gate_exps_cold_w)
+                printf("  split experts         %u hot at %s, %u cold at %s\n",
+                       blk->hot_expert_count,
+                       ingot_type_name(blk->gate_exps_w->type),
+                       blk->cold_expert_count,
+                       ingot_type_name(blk->gate_exps_cold_w->type));
             break;
         }
     }

@@ -217,6 +217,23 @@ int poe_model_open(poe_model **out, const char *path, char *err, size_t errsz) {
             blk->router_b = t;
             blk->router_bytes += t->nbytes;
             m->router_params += t->nelem;
+        } else if (name_has_prefix(rest, "ffn_gate_exps_cold.") ||
+                   name_has_prefix(rest, "ffn_up_exps_cold.")   ||
+                   name_has_prefix(rest, "ffn_down_exps_cold.")) {
+            /* the low-precision half of a split checkpoint: routed experts,
+             * so they belong in the expert accounting and not in "other" */
+            blk->is_moe = 1;
+            blk->is_split = 1;
+            blk->expert_bytes += t->nbytes;
+            blk->expert_params += t->nelem;
+            if (name_has_prefix(rest, "ffn_gate_exps_cold."))
+                blk->gate_exps_cold_w = t;
+            else if (name_has_prefix(rest, "ffn_up_exps_cold."))
+                blk->up_exps_cold_w = t;
+            else
+                blk->down_exps_cold_w = t;
+            if (t->rank == 3 && t->ne[2] > blk->cold_expert_count)
+                blk->cold_expert_count = (uint32_t)t->ne[2];
         } else if (name_has_prefix(rest, "ffn_gate_exps.") ||
                    name_has_prefix(rest, "ffn_up_exps.")   ||
                    name_has_prefix(rest, "ffn_down_exps.")) {
@@ -234,6 +251,8 @@ int poe_model_open(poe_model **out, const char *path, char *err, size_t errsz) {
             }
             /* The packed layout carries the expert count in the outermost
              * (slowest) dimension. */
+            if (t->rank == 3 && t->ne[2] > blk->hot_expert_count)
+                blk->hot_expert_count = (uint32_t)t->ne[2];
             if (t->rank == 3 && t->ne[2] > blk->expert_count)
                 blk->expert_count = (uint32_t)t->ne[2];
         } else if (name_has_prefix(rest, "ffn_gate_shexp.") ||
@@ -256,6 +275,15 @@ int poe_model_open(poe_model **out, const char *path, char *err, size_t errsz) {
                 m->other_params += t->nelem;
             }
         }
+    }
+
+    /* A split layer's expert count is both halves together — and it has to
+     * be computed after the walk, because the two tensors can appear in
+     * either order. */
+    for (uint32_t b = 0; b < m->n_blocks; b++) {
+        poe_block *blk = &m->blocks[b];
+        if (blk->is_split)
+            blk->expert_count = blk->hot_expert_count + blk->cold_expert_count;
     }
 
     /* Roll blocks up into the model totals. */
