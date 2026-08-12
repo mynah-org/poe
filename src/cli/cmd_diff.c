@@ -12,6 +12,8 @@
 
 #include "poe/plan.h"
 #include "poe/profile.h"
+#include "poe/quantplan.h"
+#include "poe/stats.h"
 #include "cli.h"
 
 static int has_suffix(const char *s, const char *suf) {
@@ -116,6 +118,76 @@ static int diff_profiles(const char *pa, const char *pb) {
     return rc;
 }
 
+/* Two bit maps over the same slabs. The question a reader has is how far
+ * apart two allocations actually fall — whether swapping the ranking moved
+ * anything, and by how many bytes — so that is what this prints. */
+static int diff_quantplans(const char *pa, const char *pb) {
+    char err[256];
+    poe_quantplan *a, *b;
+    if (poe_quantplan_load(&a, pa, err, sizeof err) != 0) {
+        fprintf(stderr, "poe diff: %s: %s\n", pa, err);
+        return 1;
+    }
+    if (poe_quantplan_load(&b, pb, err, sizeof err) != 0) {
+        fprintf(stderr, "poe diff: %s: %s\n", pb, err);
+        poe_quantplan_free(a);
+        return 1;
+    }
+
+    char s1[32], s2[32];
+    poe_format_bytes(a->bytes_after_total, s1, sizeof s1);
+    poe_format_bytes(b->bytes_after_total, s2, sizeof s2);
+    printf("A  %s   %s   %s slabs   %s\n", pa, a->method, s1, a->model_fingerprint);
+    printf("B  %s   %s   %s slabs   %s\n", pb, b->method, s2, b->model_fingerprint);
+    if (strcmp(a->model_fingerprint, b->model_fingerprint) != 0)
+        printf("warning: plans target different checkpoints\n");
+
+    int rc = 0;
+    if (a->n_layers != b->n_layers) {
+        printf("layer counts differ (%u vs %u) — nothing further to compare\n",
+               a->n_layers, b->n_layers);
+    } else {
+        const size_t n = (size_t)a->n_layers * POE_QSLAB_NPROJ;
+        uint32_t same = 0, present = 0, a_wider = 0, b_wider = 0;
+        int64_t byte_delta = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (a->type[i] < 0 || b->type[i] < 0) continue;
+            present++;
+            if (a->type[i] == b->type[i]) same++;
+            else if (a->bytes_after[i] > b->bytes_after[i]) a_wider++;
+            else b_wider++;
+            byte_delta += (int64_t)a->bytes_after[i] - (int64_t)b->bytes_after[i];
+        }
+        printf("\ntype map\n");
+        printf("  slabs with the same type   %u / %u\n", same, present);
+        printf("  wider in A                 %u\n", a_wider);
+        printf("  wider in B                 %u\n", b_wider);
+        poe_format_bytes(byte_delta < 0 ? (uint64_t)-byte_delta
+                                        : (uint64_t)byte_delta, s1, sizeof s1);
+        printf("  A - B                      %s%s\n",
+               byte_delta < 0 ? "-" : "+", s1);
+
+        const int *ladder;
+        const size_t nl = poe_quantplan_ladder(&ladder, NULL);
+        printf("\n%-8s %8s %8s\n", "type", "A", "B");
+        for (size_t t = 0; t < nl; t++) {
+            uint32_t ca = 0, cb = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (a->type[i] == ladder[t]) ca++;
+                if (b->type[i] == ladder[t]) cb++;
+            }
+            if (ca || cb)
+                printf("%-8s %8u %8u\n", ingot_type_name(ladder[t]), ca, cb);
+        }
+        printf("\nlayer scores   Spearman %+.3f   (depth %+.3f vs %+.3f)\n",
+               poe_spearman(a->layer_score, b->layer_score, a->n_layers),
+               a->depth_rho, b->depth_rho);
+    }
+    poe_quantplan_free(a);
+    poe_quantplan_free(b);
+    return rc;
+}
+
 static int diff_models(const char *pa, const char *pb) {
     char err[256];
     poe_model *a, *b;
@@ -184,18 +256,28 @@ int poe_cmd_diff(int argc, char **argv) {
     }
     if (pa == NULL || pb == NULL) {
         fprintf(stderr, "usage: poe diff <a> <b>   "
-                        "(two .poeplan, .poeprofile, or .gguf files)\n");
+                        "(two .poeplan, .poeprofile, .poequant, or .gguf files)\n");
         return 2;
     }
 
-    if (has_suffix(pa, ".poeplan") && has_suffix(pb, ".poeplan"))
-        return diff_plans(pa, pb);
-    if (has_suffix(pa, ".poeprofile") && has_suffix(pb, ".poeprofile"))
-        return diff_profiles(pa, pb);
-    if ((has_suffix(pa, ".poeplan") || has_suffix(pa, ".poeprofile")) !=
-        (has_suffix(pb, ".poeplan") || has_suffix(pb, ".poeprofile"))) {
+    /* Kind is decided by extension, and mixing kinds is refused rather than
+     * silently falling through to the GGUF path. */
+    enum { KIND_GGUF, KIND_PLAN, KIND_PROFILE, KIND_QUANT };
+    const char *paths[2] = { pa, pb };
+    int kind[2];
+    for (int i = 0; i < 2; i++)
+        kind[i] = has_suffix(paths[i], ".poeplan")    ? KIND_PLAN
+                : has_suffix(paths[i], ".poeprofile") ? KIND_PROFILE
+                : has_suffix(paths[i], ".poequant")   ? KIND_QUANT
+                                                      : KIND_GGUF;
+    if (kind[0] != kind[1]) {
         fprintf(stderr, "poe diff: cannot compare artifacts of different kinds\n");
         return 2;
     }
-    return diff_models(pa, pb);
+    switch (kind[0]) {
+    case KIND_PLAN:    return diff_plans(pa, pb);
+    case KIND_PROFILE: return diff_profiles(pa, pb);
+    case KIND_QUANT:   return diff_quantplans(pa, pb);
+    default:           return diff_models(pa, pb);
+    }
 }

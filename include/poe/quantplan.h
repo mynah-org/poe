@@ -39,7 +39,7 @@ typedef struct {
     char     poe_version[32];
     char     model_fingerprint[24];
     char     arch[64];
-    char     method[16];               /* saliency | uniform                */
+    char     method[32];               /* saliency | uniform | imatrix-*    */
     uint32_t n_layers, n_experts;
 
     /* Per layer × projection, indexed [layer * POE_QSLAB_NPROJ + proj]. */
@@ -51,6 +51,12 @@ typedef struct {
     /* Per layer, the normalized saliency the allocation was driven by
      * (1.0 = the most salient layer). Uniform method leaves these at 1. */
     double   *layer_score;
+
+    /* Spearman of layer_score against depth. A score that is nearly a
+     * monotone function of the layer index is the shape both losing
+     * allocations had, so it is recorded in the artifact and warned about
+     * rather than left for a reader to notice. 0 when there is no ranking. */
+    double    depth_rho;
 
     /* Exact accounting over routed expert slabs only — the tensors this
      * plan re-types. Everything else in the checkpoint is untouched, so it
@@ -74,6 +80,27 @@ int poe_quantplan_build(poe_quantplan **out, const poe_model *m,
                         const int *types, size_t n_types, int force,
                         char *err, size_t errsz);
 
+/* Everything the allocator can be told, in one place.
+ *
+ * `layer_scores` is an externally computed per-layer ranking — an imatrix
+ * statistic, say — and takes precedence over `profile`, which is then used
+ * for nothing but its fingerprint check. `score_label` names it in the
+ * artifact ("imatrix-energy"); NULL means "external". */
+typedef struct {
+    const poe_profile *profile;
+    const double      *layer_scores;
+    const char        *score_label;
+    uint64_t           target_bytes;
+    const int         *types;
+    size_t             n_types;
+    int                force;
+    int                invert;
+} poe_quantplan_opts;
+
+int poe_quantplan_build_opts(poe_quantplan **out, const poe_model *m,
+                             const poe_quantplan_opts *o,
+                             char *err, size_t errsz);
+
 /* The same, with `invert` flipping every layer score (score -> 1 - score).
  * A deliberately wrong allocation is the control an experiment needs: it
  * separates "the saliency signal is informative" from "any non-uniform map
@@ -87,6 +114,12 @@ int poe_quantplan_build_ex(poe_quantplan **out, const poe_model *m,
 /* The .poequant artifact (JSON, human-diffable). */
 int poe_quantplan_write(const poe_quantplan *p, const char *path,
                         char *err, size_t errsz);
+
+/* Read one back. Only what a comparison needs is reconstructed — the type
+ * map, the per-slab bytes, the layer scores and the accounting — so a loaded
+ * plan is for reporting, not for re-deriving an allocation. */
+int poe_quantplan_load(poe_quantplan **out, const char *path,
+                       char *err, size_t errsz);
 
 /* The `--tensor-type` file llama-quantize reads: one `name=type` per line,
  * with the name written as a regex anchored tightly enough not to match a

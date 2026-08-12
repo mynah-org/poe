@@ -27,11 +27,11 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe compare` | ✅ expert-fingerprint overlap between workload profiles: Jaccard / weighted Jaccard / Spearman / JS divergence, exclusive and cold experts, REAP prune-set agreement |
 | `poe plan` | ✅ deterministic expert-removal plans from weighted profiles (`reap` / `frequency` / `gate`), exact byte accounting, conservative guards ([format](docs/poeplan.md)) |
 | `poe estimate` | ✅ plan accounting + fingerprint/byte verification against the source model |
-| `poe diff` | ✅ plans (prune-set agreement), profiles, and structural model diffs |
+| `poe diff` | ✅ plans (prune-set agreement), profiles, bit maps (`.poequant`: type map, byte delta, rank correlation of the layer scores), and structural model diffs |
 | `poe apply` | ✅ structural GGUF pruning: slices packed expert tensors along the expert dimension, compacts router rows in keep order, patches `expert_count`, preserves all other metadata byte-for-byte; streams mmap → output, then reopens and verifies exact accounting |
 | `poe forge` | ✅ the whole pipeline in one command: (profile via `poe-profile` →) plan → exact estimate → apply → verify, intermediate artifacts preserved next to the output |
 | `tools/coding_eval.py` | ✅ pruned-vs-full behavioral eval: 10 coding tasks (easy→hard) generated at temp 0 through llama-server, compiled/executed against hidden test cases; win/fail per task + prompt/generation t/s |
-| `poe quantplan` | ✅ per-slab mixed precision: spend a byte budget across the routed expert slabs (Q2_K..Q6_K ladder, greedy by measured error per byte), exact accounting, emits llama-quantize's `--tensor-type-file` |
+| `poe quantplan` | ✅ per-slab mixed precision: spend a byte budget across the routed expert slabs (Q2_K..Q6_K ladder, greedy by measured error per byte), exact accounting, emits llama-quantize's `--tensor-type-file`; ranks layers by REAP saliency (`--profile`) or by an imatrix statistic (`--imatrix`), and reports how far the ranking is from being a plain depth ramp |
 | `poe validate` | ✅ structural checks (shapes vs metadata, slab divisibility, quant geometry); with `--plan`, source/pruned provenance and exact byte accounting |
 
 Recipe + field notes: [docs/reap-coding-recipe.md](docs/reap-coding-recipe.md).

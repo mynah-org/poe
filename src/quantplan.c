@@ -2,6 +2,8 @@
  * accounting.
  * SPDX-License-Identifier: MIT */
 #include "poe/quantplan.h"
+#include "poe/stats.h"
+#include "json.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -86,6 +88,27 @@ int poe_quantplan_build_ex(poe_quantplan **out, const poe_model *m,
                            const poe_profile *profile, uint64_t target_bytes,
                            const int *types, size_t n_types, int force,
                            int invert, char *err, size_t errsz) {
+    const poe_quantplan_opts o = {
+        .profile = profile, .layer_scores = NULL, .score_label = NULL,
+        .target_bytes = target_bytes, .types = types, .n_types = n_types,
+        .force = force, .invert = invert
+    };
+    return poe_quantplan_build_opts(out, m, &o, err, errsz);
+}
+
+int poe_quantplan_build_opts(poe_quantplan **out, const poe_model *m,
+                             const poe_quantplan_opts *o,
+                             char *err, size_t errsz) {
+    if (o == NULL) {
+        if (err) snprintf(err, errsz, "null argument");
+        return -1;
+    }
+    const poe_profile *profile = o->profile;
+    const uint64_t target_bytes = o->target_bytes;
+    const int *types = o->types;
+    const size_t n_types = o->n_types;
+    const int force = o->force, invert = o->invert;
+
     if (out == NULL || m == NULL) {
         if (err) snprintf(err, errsz, "null argument");
         return -1;
@@ -127,7 +150,9 @@ int poe_quantplan_build_ex(poe_quantplan **out, const poe_model *m,
     snprintf(p->model_fingerprint, sizeof p->model_fingerprint, "%s", m->fingerprint);
     snprintf(p->arch, sizeof p->arch, "%s", m->arch);
     snprintf(p->method, sizeof p->method, "%s",
-             profile != NULL ? "saliency" : "uniform");
+             o->layer_scores != NULL
+                 ? (o->score_label ? o->score_label : "external")
+                 : profile != NULL ? "saliency" : "uniform");
     p->n_layers = m->n_blocks;
     p->n_experts = m->expert_count;
     p->target_bytes = target_bytes;
@@ -157,7 +182,23 @@ int poe_quantplan_build_ex(poe_quantplan **out, const poe_model *m,
      * silently returning a uniform plan labelled "saliency" is not. */
     double lo = 0.0, hi = 0.0;
     int have_scores = 0;
-    if (profile == NULL) {
+    if (o->layer_scores != NULL) {
+        /* An external ranking (an imatrix statistic, say). The allocator
+         * does not care where a score came from, only that it is per layer
+         * and comparable across layers. */
+        for (uint32_t l = 0; l < p->n_layers; l++) {
+            const double s = o->layer_scores[l];
+            p->layer_score[l] = s;
+            if (l == 0 || s < lo) lo = s;
+            if (l == 0 || s > hi) hi = s;
+        }
+        have_scores = hi > lo;
+        if (!have_scores) {
+            warn(p, "every layer has the same score; allocation degenerates "
+                    "to uniform");
+            snprintf(p->method, sizeof p->method, "uniform");
+        }
+    } else if (profile == NULL) {
         /* nothing to say: uniform is what was asked for */
     } else if (profile->n_layers != p->n_layers ||
                profile->n_experts != p->n_experts) {
@@ -196,6 +237,21 @@ int poe_quantplan_build_ex(poe_quantplan **out, const poe_model *m,
     } else if (invert) {
         warn(p, "--invert had nothing to invert: no usable layer scores");
     }
+
+    /* The depth check. Per-layer REAP totals on Qwen3.6 rise monotonically
+     * with depth because the residual stream's norm does, and an allocation
+     * driven by that ranking lost to uniform — as did its inverse, which is
+     * how we know the ranking carried no direction. Any score that is
+     * essentially the layer index has that same problem, whatever it was
+     * derived from, so the plan says so rather than leaving it to be
+     * discovered by a measurement. */
+    p->depth_rho = have_scores ? poe_depth_rho(p->layer_score, p->n_layers)
+                               : 0.0;
+    if (have_scores && (p->depth_rho >= 0.9 || p->depth_rho <= -0.9))
+        warn(p, "layer scores are near-monotone in depth (Spearman %+.2f): "
+                "both allocations that lost to uniform had this shape — "
+                "measure against uniform, and carry --invert as a control",
+             p->depth_rho);
 
     /* Every routed slab starts at the cheapest candidate. */
     uint64_t floor_bytes = 0;
@@ -317,6 +373,7 @@ int poe_quantplan_write(const poe_quantplan *p, const char *path,
     fprintf(f, "  \"model_fingerprint\": \"%s\",\n", p->model_fingerprint);
     fprintf(f, "  \"arch\": \"%s\",\n", p->arch);
     fprintf(f, "  \"method\": \"%s\",\n", p->method);
+    fprintf(f, "  \"depth_rho\": %.6f,\n", p->depth_rho);
     fprintf(f, "  \"n_layers\": %u, \"n_experts\": %u,\n",
             p->n_layers, p->n_experts);
     fprintf(f, "  \"expected\": {\n");
@@ -354,6 +411,119 @@ int poe_quantplan_write(const poe_quantplan *p, const char *path,
     fprintf(f, "\n  ]\n}\n");
     if (ferror(f)) { fclose(f); if (err) snprintf(err, errsz, "write failed"); return -1; }
     fclose(f);
+    return 0;
+}
+
+/* Type ids are ggml's, so the name is the only stable key a file can carry.
+ * The scan is over the small id space ggml uses; an unknown id yields a name
+ * that matches nothing, which is the right answer. */
+static int type_from_name(const char *name) {
+    if (name == NULL || *name == '\0') return -1;
+    for (int t = 0; t < 64; t++) {
+        const char *n = ingot_type_name(t);
+        if (n != NULL && strcmp(n, name) == 0) return t;
+    }
+    return -1;
+}
+
+static int qfail(char *err, size_t errsz, const char *msg) {
+    if (err && errsz) snprintf(err, errsz, "%s", msg);
+    return -1;
+}
+
+int poe_quantplan_load(poe_quantplan **out, const char *path,
+                       char *err, size_t errsz) {
+    if (out == NULL || path == NULL) return qfail(err, errsz, "null argument");
+    *out = NULL;
+
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return qfail(err, errsz, "cannot open the plan");
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return qfail(err, errsz, "empty plan"); }
+    char *text = malloc((size_t)sz);
+    if (text == NULL || fread(text, 1, (size_t)sz, f) != (size_t)sz) {
+        free(text); fclose(f);
+        return qfail(err, errsz, "cannot read the plan");
+    }
+    fclose(f);
+
+    poe_json *j = poe_json_parse(text, (size_t)sz, err, errsz);
+    free(text);
+    if (j == NULL) return -1;
+
+    if (poe_json_get(j, "poequant") == NULL) {
+        poe_json_free(j);
+        return qfail(err, errsz, "not a .poequant (missing \"poequant\" key)");
+    }
+
+    poe_quantplan *p = calloc(1, sizeof *p);
+    if (p == NULL) { poe_json_free(j); return qfail(err, errsz, "out of memory"); }
+    p->version = (uint32_t)poe_json_u64(poe_json_get(j, "poequant"), 0);
+    snprintf(p->poe_version, sizeof p->poe_version, "%s",
+             poe_json_str(poe_json_get(j, "poe_version"), ""));
+    snprintf(p->model_fingerprint, sizeof p->model_fingerprint, "%s",
+             poe_json_str(poe_json_get(j, "model_fingerprint"), ""));
+    snprintf(p->arch, sizeof p->arch, "%s",
+             poe_json_str(poe_json_get(j, "arch"), ""));
+    snprintf(p->method, sizeof p->method, "%s",
+             poe_json_str(poe_json_get(j, "method"), ""));
+    p->depth_rho = poe_json_num(poe_json_get(j, "depth_rho"), 0.0);
+    p->n_layers  = (uint32_t)poe_json_u64(poe_json_get(j, "n_layers"), 0);
+    p->n_experts = (uint32_t)poe_json_u64(poe_json_get(j, "n_experts"), 0);
+
+    const poe_json *ex = poe_json_get(j, "expected");
+    p->target_bytes       = poe_json_u64(poe_json_get(ex, "target_bytes"), 0);
+    p->bytes_before_total = poe_json_u64(poe_json_get(ex, "slab_bytes_before"), 0);
+    p->bytes_after_total  = poe_json_u64(poe_json_get(ex, "slab_bytes_after"), 0);
+    p->model_bytes_before = poe_json_u64(poe_json_get(ex, "model_bytes_before"), 0);
+
+    const poe_json *warns = poe_json_get(j, "warnings");
+    for (size_t i = 0; i < poe_json_len(warns) && i < POE_QUANT_MAX_WARN; i++)
+        snprintf(p->warnings[p->n_warnings++], sizeof p->warnings[0], "%s",
+                 poe_json_str(poe_json_at(warns, i), ""));
+
+    const poe_json *layers = poe_json_get(j, "layers");
+    if (p->n_layers == 0 || poe_json_len(layers) == 0 ||
+        poe_json_len(layers) > p->n_layers) {
+        poe_json_free(j); poe_quantplan_free(p);
+        return qfail(err, errsz, "plan shape is inconsistent");
+    }
+
+    const size_t n_slabs = (size_t)p->n_layers * POE_QSLAB_NPROJ;
+    p->type         = calloc(n_slabs, sizeof *p->type);
+    p->type_before  = calloc(n_slabs, sizeof *p->type_before);
+    p->bytes_before = calloc(n_slabs, sizeof *p->bytes_before);
+    p->bytes_after  = calloc(n_slabs, sizeof *p->bytes_after);
+    p->nelem        = calloc(n_slabs, sizeof *p->nelem);
+    p->layer_score  = calloc(p->n_layers, sizeof *p->layer_score);
+    if (!p->type || !p->type_before || !p->bytes_before || !p->bytes_after ||
+        !p->nelem || !p->layer_score) {
+        poe_json_free(j); poe_quantplan_free(p);
+        return qfail(err, errsz, "out of memory");
+    }
+    for (size_t i = 0; i < n_slabs; i++) { p->type[i] = -1; p->type_before[i] = -1; }
+
+    for (size_t i = 0; i < poe_json_len(layers); i++) {
+        const poe_json *lj = poe_json_at(layers, i);
+        const uint32_t l = (uint32_t)poe_json_u64(poe_json_get(lj, "layer"),
+                                                  p->n_layers);
+        if (l >= p->n_layers) continue;
+        p->layer_score[l] = poe_json_num(poe_json_get(lj, "score"), 1.0);
+        for (int pr = 0; pr < POE_QSLAB_NPROJ; pr++) {
+            const poe_json *s = poe_json_get(lj, proj_suffix[pr]);
+            if (s == NULL) continue;
+            const size_t k = (size_t)l * POE_QSLAB_NPROJ + pr;
+            p->type[k]         = type_from_name(poe_json_str(poe_json_get(s, "to"), ""));
+            p->type_before[k]  = type_from_name(poe_json_str(poe_json_get(s, "from"), ""));
+            p->bytes_before[k] = poe_json_u64(poe_json_get(s, "bytes_before"), 0);
+            p->bytes_after[k]  = poe_json_u64(poe_json_get(s, "bytes_after"), 0);
+        }
+    }
+
+    poe_json_free(j);
+    *out = p;
     return 0;
 }
 

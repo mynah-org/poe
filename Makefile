@@ -10,7 +10,8 @@ INCLUDE  = -Iinclude -Ithird_party/ingot
 LDLIBS   = -lpthread -lm
 
 LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
-           src/profiler/imatrix.c src/json.c src/profile.c src/plan.c src/apply.c src/quantplan.c
+           src/profiler/imatrix.c src/imatrix_stats.c src/json.c src/stats.c \
+           src/profile.c src/plan.c src/apply.c src/quantplan.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c src/cli/cmd_plan.c \
            src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c \
@@ -33,17 +34,22 @@ poe: $(OBJ)
 
 %.o: %.c
 	$(CC) $(WARN) $(CFLAGS) $(INCLUDE) -MMD -MP -c $< -o $@
--include $(SRC:.c=.d) tests/fixture.d tests/test_model.d tools/poe_mkfixture.d
+# Every object, tests and tools included. Listing only some of them let a
+# test object go stale against an edited header, which does not fail to
+# build — it links two different ideas of a struct layout and crashes.
+-include $(SRC:.c=.d) $(wildcard tests/*.d) $(wildcard tools/*.d)
 
 build:
 	mkdir -p build
 
 ## test: synthetic-fixture tests + a CLI smoke run (no model downloads)
 test: build/test_model build/test_accum build/test_compare build/test_plan \
-      build/test_apply build/test_imatrix build/test_quantplan poe | build
+      build/test_apply build/test_imatrix build/test_imatrix_stats \
+      build/test_quantplan poe | build
 	./build/test_model
 	./build/test_accum
 	./build/test_imatrix build/test.imatrix.gguf
+	./build/test_imatrix_stats build/test-stats.imatrix.gguf build/test-plain.gguf
 	./build/test_compare
 	./build/test_plan
 	./build/test_apply
@@ -69,6 +75,11 @@ test: build/test_model build/test_accum build/test_compare build/test_plan \
 	./poe apply build/smoke.poeplan build/plan-fix.gguf --top-k 1 -o build/smoke-topk.gguf > /dev/null
 	./poe validate build/smoke-topk.gguf --plan build/smoke.poeplan > /dev/null
 	./poe plan build/plan-fix.gguf --profile build/plan.poeprofile --method frequency --prune 50% -o build/smoke50.poeplan > /dev/null
+	./poe quantplan build/fixture-moe.gguf --target-size 15% \
+	    --imatrix build/test-stats.imatrix.gguf -o build/imat.poequant \
+	    --tensor-types build/imat.tt
+	./poe quantplan build/fixture-moe.gguf --target-size 15% -o build/uni.poequant
+	./poe diff build/imat.poequant build/uni.poequant
 	./poe diff build/smoke.poeplan build/smoke50.poeplan
 	./poe diff build/pa.poeprofile build/pb.poeprofile
 	./poe diff build/fixture-moe.gguf build/fixture-moe-seed9.gguf
@@ -84,8 +95,13 @@ build/test_imatrix: tests/test_imatrix.o src/profiler/imatrix.o \
                     third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
+build/test_imatrix_stats: tests/test_imatrix_stats.o src/profiler/imatrix.o \
+                          src/imatrix_stats.o src/stats.o \
+                          third_party/ingot/ingot.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
 build/test_quantplan: tests/test_quantplan.o tests/fixture.o src/quantplan.o \
-                      src/profile.o src/json.o src/model.o src/fmt.o \
+                      src/profile.o src/json.o src/stats.o src/model.o src/fmt.o \
                       third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 

@@ -196,7 +196,76 @@ int main(int argc, char **argv) {
         CHECK(lines == (int)((size_t)p->n_layers * POE_QSLAB_NPROJ),
               "one line per slab (%d)", lines);
         CHECK(anchored, "every pattern is anchored and has escaped dots");
+
+        /* Read the artifact back: a comparison is only as good as what
+         * survives the round trip. */
+        poe_quantplan *r = NULL;
+        CHECK(poe_quantplan_load(&r, "build/test.poequant", err, sizeof err) == 0,
+              "load .poequant (%s)", err[0] ? err : "ok");
+        if (r != NULL) {
+            int same_types = 1, same_bytes = 1;
+            for (size_t i = 0; i < (size_t)p->n_layers * POE_QSLAB_NPROJ; i++) {
+                if (r->type[i] != p->type[i]) same_types = 0;
+                if (r->bytes_after[i] != p->bytes_after[i]) same_bytes = 0;
+            }
+            CHECK(same_types, "every slab type survives the round trip");
+            CHECK(same_bytes, "every slab's bytes survive the round trip");
+            CHECK(r->bytes_after_total == p->bytes_after_total &&
+                  r->target_bytes == p->target_bytes,
+                  "the accounting survives the round trip");
+            CHECK(strcmp(r->method, p->method) == 0 &&
+                  strcmp(r->model_fingerprint, p->model_fingerprint) == 0,
+                  "method and fingerprint survive the round trip");
+            poe_quantplan_free(r);
+        }
         poe_quantplan_free(p);
+    }
+
+    /* ── external scores and the depth check ──────────────────────────── */
+    {
+        double *scores = calloc(m->n_blocks, sizeof *scores);
+        if (scores != NULL) {
+            for (uint32_t l = 0; l < m->n_blocks; l++)
+                scores[l] = (double)(l + 1);          /* a pure depth ramp */
+            poe_quantplan_opts o = {
+                .layer_scores = scores, .score_label = "imatrix-energy",
+                .target_bytes = slabs / 8
+            };
+            poe_quantplan *e = NULL;
+            CHECK(poe_quantplan_build_opts(&e, m, &o, err, sizeof err) == 0,
+                  "build from external scores (%s)", err[0] ? err : "ok");
+            if (e != NULL) {
+                CHECK(strcmp(e->method, "imatrix-energy") == 0,
+                      "the ranking is labelled by its source (%s)", e->method);
+                CHECK(fabs(e->depth_rho - 1.0) < 1e-9,
+                      "a depth ramp is recorded as depth_rho %.3f", e->depth_rho);
+                int warned = 0;
+                for (uint32_t i = 0; i < e->n_warnings; i++)
+                    if (strstr(e->warnings[i], "depth")) warned = 1;
+                CHECK(warned, "the depth confound is warned about, not left "
+                              "for a measurement to discover");
+                CHECK(e->bytes_after_total <= o.target_bytes,
+                      "external scores still respect the budget");
+
+                /* Inverting must move bits the other way — the control an
+                 * experiment needs is only useful if it is actually different. */
+                poe_quantplan_opts oi = o;
+                oi.invert = 1;
+                poe_quantplan *iv = NULL;
+                if (poe_quantplan_build_opts(&iv, m, &oi, err, sizeof err) == 0) {
+                    int differs = 0;
+                    for (size_t i = 0; i < (size_t)e->n_layers * POE_QSLAB_NPROJ; i++)
+                        if (iv->type[i] != e->type[i]) differs = 1;
+                    CHECK(differs, "--invert produces a different allocation");
+                    CHECK(fabs(iv->depth_rho + 1.0) < 1e-9,
+                          "the inverted ranking is a reversed ramp (%.3f)",
+                          iv->depth_rho);
+                    poe_quantplan_free(iv);
+                }
+                poe_quantplan_free(e);
+            }
+            free(scores);
+        }
     }
 
     poe_model_close(m);

@@ -96,3 +96,61 @@ no arm here could express it.
 type for the expert slabs and spend the effort on choosing the right total
 size. `poe quantplan --types q3_k` writes that plan, and it is the arm that
 won.
+
+## What the tool learned from losing
+
+A negative result is only worth its cost if the next attempt cannot repeat
+it by accident, so the failure mode is now something `poe quantplan`
+measures about its own input rather than something a GPU run discovers
+three hours later.
+
+**The depth check.** Every plan records `depth_rho`, the Spearman
+correlation of its per-layer scores against the layer index, and warns when
+it is at or beyond ±0.9:
+
+```
+depth     Spearman +0.987 against the layer index   (see the warning below)
+warning: layer scores are near-monotone in depth (Spearman +0.99): both
+         allocations that lost to uniform had this shape — measure against
+         uniform, and carry --invert as a control
+```
+
+A ranking that is essentially the layer index is not necessarily wrong, but
+it is the exact shape that has already failed twice — once for routing
+budgets, once for precision — and it should not be spent GPU time on
+without a control.
+
+**A second ranking, from the imatrix rather than the profile.** REAP
+saliency measures an expert's contribution to the layer *output*, which is
+the right question for deletion. Requantization damages the product of a
+weight matrix with its *inputs*, and an imatrix is literally the quantity a
+weighted encoder fits against, so `poe quantplan --imatrix` ranks layers by
+it instead:
+
+- `--imatrix-stat energy` (default) — mean squared input activation per
+  element. It carries the activation scale, which on a residual network
+  means it is expected to be a depth ramp; the depth check will say so.
+- `--imatrix-stat concentration` — one minus the participation ratio of the
+  per-column energy. Scale-free by construction, so it cannot be an
+  activation-norm ramp in disguise: it measures how far a layer's input
+  energy is concentrated in a few columns, which is what makes a block hard
+  to fit at two or three bits.
+
+Neither is a result. They are candidate rankings, and the only thing that
+promotes one is beating uniform at matched bytes.
+
+**Comparing two bit maps is one command.** `poe diff a.poequant b.poequant`
+reports how many slabs got the same type, how the bytes moved, the type
+histogram side by side, and the rank correlation of the two layer scores —
+which answers "did swapping the ranking actually change anything" before a
+quantize run does:
+
+```
+type map
+  slabs with the same type   3 / 12
+  wider in A                 6
+  wider in B                 3
+  A - B                      +288 B
+
+layer scores   Spearman +0.000   (depth +1.000 vs +0.000)
+```
