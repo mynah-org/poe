@@ -108,13 +108,21 @@ ones. Ruled out by experiment, in this order:
   it was not the crash;
 - MMQ versus cuBLAS selection (`GGML_CUDA_FORCE_CUBLAS=1` still crashes).
 
-**The remaining suspect** is the ids tensor's provenance: `mul_mat_id` on
-CUDA normally receives the argsort *view*, and this patch hands it a derived
-tensor (cast → clamp → cast). Something on that path — most likely the
-`mmq_ids_helper` mapping — depends on the layout or stride of the tensor it
-is given. The next step is to compare `ne`/`nb`/buffer of the stock ids
-against the derived one at graph-build time, or to produce the clamped ids
-with an op the CUDA path already handles rather than a cast chain.
+**The remaining suspect, stated precisely so the next attempt starts here.**
+`mul_mat_id` on CUDA normally receives the argsort *view*, whose rows are
+strided by the full expert count: `nb[1] = n_expert * 4`. This patch hands it
+a compact tensor instead, `nb[1] = n_expert_used * 4` — same values, eight
+times narrower rows. If anything in the MMQ ids path assumes the stock
+stride (or derives a row count from `nb[1]`), it walks off the 16 KB ids
+buffer into uninitialized memory, which is exactly what a sign-extended
+negative id looks like. The CPU path uses `nb` correctly, which is why it
+works there and only there.
+
+Two ways to test it, cheapest first: print `ne`/`nb` of the stock ids and of
+the derived one at graph-build time and compare; then, if they differ as
+predicted, hand `mul_mat_id` a *view* with the stock stride — clamp into a
+full-width `[n_expert, n_tokens]` buffer and view its first `n_expert_used`
+rows — rather than a compact tensor.
 
 `POE_SPLIT_PASSES=1` is left in deliberately: it is what turned "the split
 crashes" into "the hot half alone crashes", which is half the search space
