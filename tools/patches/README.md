@@ -108,6 +108,8 @@ each one a build and a run:
 | degenerate id distribution | placeholders spread across the half instead of piled on one expert |
 | MMQ versus cuBLAS | `GGML_CUDA_FORCE_CUBLAS=1` still crashes |
 | **the patch breaking the normal path** | the same build scores a normal model fine: `[1]1.6840,[2]1.7739` |
+| **the ids themselves** | a probe inside `mmq.cu` copies them to the host before the launch: `ne02=111 n_used=8 si1=256 min=0 max=110 out_of_range=0 first=[3 37 5 46]` — exactly right, and it still crashes |
+| an unaligned expert count | 111 is odd, so the split was redone at 128/128 — same crash |
 
 One real bug was found and fixed on the way: `ggml_clamp` is in-place and
 returns a view of its input (`ggml.h` says so), so the hot ids, cold ids and
@@ -120,14 +122,26 @@ all failing configurations is a `mul_mat_id` whose `src0->ne[2]` is 111 while
 the model's `n_expert` is 256 — a shape stock llama.cpp never produces, since
 its expert tensors always carry the full expert count.
 
-Since in-range ids do not help, the ids the kernel reads are probably not the
-ids the graph computes: the derived tensor's device buffer may simply never
-be written. **The next step is therefore to observe, not to guess**: dump the
-ids at compute time with a `ggml_backend_sched_eval_callback` (or
-`GGML_SCHED_DEBUG=2`) and compare what `mm_ids_helper` receives against what
-the graph built. `ggml/src/ggml-cuda/mmq.cu:183-201` is where they meet —
-`expert_bounds` is sized `ne02 + 1` and the helper is handed `ids->data`
-directly.
+The probe settles the ids: they are correct on the device, in range, with
+the stock stride. So the fault is on the **other** input — the activation
+staging. `quantize_mmq_q8_1` with `has_ids` writes into `src1_q8_1`, sized
+
+```c
+ne12*n_expert_used*ne10_padded * y_block_size/y_values_per_block +
+    ggml_cuda_mmq_get_J_max(src0->type, fallback, cc, ne11) * sizeof(block_q8_1_mmq)
+```
+
+and scatters through the inverse map `ids_src1` that `mm_ids_helper` builds
+(`dedup_bcast` is on here, because `ne11 == 1` — MoE activations are
+broadcast across experts). Nothing in that expression mentions the expert
+count, which is the one thing this checkpoint changes, so the next step is to
+read `mm_ids_helper` and check what it writes into `ids_src1` when the ids
+span a *subset* of `[0, ne02)` — every stock MoE covers the whole range,
+because its tensors carry every expert the router can name.
+
+Worth trying before that, because it is one flag: `GGML_CUDA_FORCE_MMQ=0`
+(distinct from `FORCE_CUBLAS`, which was already tested) would take the
+quantizer that is crashing out of the picture entirely.
 
 `POE_SPLIT_PASSES=1` is left in deliberately: it is what turned "the split
 crashes" into "the hot half alone crashes", which is half the search space

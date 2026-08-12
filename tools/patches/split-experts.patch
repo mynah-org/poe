@@ -37,10 +37,10 @@ index 49c2a6a..7dd2828 100644
      LLM_TENSOR_FFN_GATE_UP_EXPS,
      LLM_TENSOR_FFN_DOWN_SHEXP,
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 2be3b75..faf1c4b 100644
+index 2be3b75..32e6bf0 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1867,6 +1867,37 @@ ggml_tensor * llm_graph_context::build_ffn(
+@@ -1867,6 +1867,53 @@ ggml_tensor * llm_graph_context::build_ffn(
      return cur;
  }
  
@@ -75,10 +75,26 @@ index 2be3b75..faf1c4b 100644
 +    return k;
 +}
 +
++
++// POE split: hand mul_mat_id an ids tensor shaped the way the stock graph
++// does. The router's selection is a VIEW of the argsort output, so its rows
++// are strided by the full expert count; a compact tensor has rows only
++// n_expert_used wide. Pad back to full width and view the first n_expert_used
++// columns, so stride and provenance match what the CUDA path expects.
++static ggml_tensor * poe_ids_stock_layout(ggml_context * ctx0, ggml_tensor * f_ids,
++                                          int64_t n_expert, int64_t n_used,
++                                          int64_t n_tokens) {
++    ggml_tensor * wide = n_expert > n_used
++        ? ggml_pad(ctx0, f_ids, (int) (n_expert - n_used), 0, 0, 0)
++        : f_ids;
++    ggml_tensor * ids = ggml_cast(ctx0, wide, GGML_TYPE_I32);
++    return ggml_view_2d(ctx0, ids, n_used, n_tokens, ids->nb[1], 0);
++}
++
  ggml_tensor * llm_graph_context::build_moe_ffn(
           ggml_tensor * cur,
           ggml_tensor * gate_inp,
-@@ -1886,7 +1917,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -1886,7 +1933,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
           ggml_tensor * up_exps_s,
           ggml_tensor * gate_exps_s,
           ggml_tensor * down_exps_s,
@@ -90,7 +106,7 @@ index 2be3b75..faf1c4b 100644
      return build_moe_ffn(
          cur,
          gate_inp,  /* gate_inp_b  */ nullptr,
-@@ -1907,7 +1941,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -1907,7 +1957,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          up_exps_s,
          gate_exps_s,
          down_exps_s,
@@ -102,7 +118,7 @@ index 2be3b75..faf1c4b 100644
      );
  }
  
-@@ -1935,7 +1972,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -1935,7 +1988,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
           ggml_tensor * up_exps_s,
           ggml_tensor * gate_exps_s,
           ggml_tensor * down_exps_s,
@@ -117,7 +133,7 @@ index 2be3b75..faf1c4b 100644
      const int64_t n_embd   = cur->ne[0];
      const int64_t n_tokens = cur->ne[1];
      const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
-@@ -2075,7 +2118,63 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2075,7 +2134,107 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      //call early so that topk-moe can be used
      ggml_build_forward_expand(gf, weights);
  
@@ -146,34 +162,78 @@ index 2be3b75..faf1c4b 100644
 +        // graph order hides it, on CUDA the hot ids come out of range and the
 +        // expert matmul reads past the end of its tensor.
 +        ggml_tensor * sel_c = ggml_cont(ctx0, selected_experts);
-+        ggml_tensor * sel_f_hot  = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
-+        ggml_tensor * sel_f_cold = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
-+        ggml_tensor * sel_f_mask = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++        ggml_tensor * sel_f_hot   = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++        ggml_tensor * sel_f_hot2  = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++        ggml_tensor * sel_f_cold  = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++        ggml_tensor * sel_f_cold2 = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
++        ggml_tensor * sel_f_mask  = ggml_cast(ctx0, sel_c, GGML_TYPE_F32);
 +
 +        // hot pass reads a valid row for every slot; cold slots are zeroed by
 +        // the mask below, so the row they clamp onto never reaches the output
-+        selected_experts = ggml_cast(ctx0,
-+            ggml_clamp(ctx0, sel_f_hot, 0.0f, (float) (n_hot - 1)), GGML_TYPE_I32);
++        if (getenv("POE_SPLIT_DEBUG") && il == 0) {
++            fprintf(stderr, "POE stock ids: ne=[%lld,%lld] nb=[%zu,%zu] type=%d\n",
++                    (long long) selected_experts->ne[0], (long long) selected_experts->ne[1],
++                    selected_experts->nb[0], selected_experts->nb[1],
++                    (int) selected_experts->type);
++        }
++
++        // the hot indicator, and its complement
++        ggml_tensor * m     = ggml_clamp(ctx0,
++            ggml_scale_bias(ctx0, sel_f_mask, -1.0f, (float) n_hot), 0.0f, 1.0f);
++        ggml_tensor * m_inv = ggml_scale_bias(ctx0, m, -1.0f, 1.0f);
++
++        // hot: the true id where the slot is hot, a spread stand-in elsewhere
++        ggml_tensor * hot_f = ggml_add(ctx0,
++            ggml_mul(ctx0, sel_f_hot, m),
++            ggml_mul(ctx0, ggml_scale(ctx0, sel_f_hot2,
++                                      (float) n_hot / (float) n_expert), m_inv));
++        selected_experts = poe_ids_stock_layout(ctx0,
++            ggml_clamp(ctx0, hot_f, 0.0f, (float) (n_hot - 1)),
++            n_expert, n_expert_used, n_tokens);
 +        cb(selected_experts, "ffn_moe_topk_hot", il);
 +
-+        poe_sel_cold = ggml_cast(ctx0,
-+            ggml_clamp(ctx0, ggml_scale_bias(ctx0, sel_f_cold, 1.0f, -(float) n_hot),
-+                       0.0f, (float) (n_cold - 1)), GGML_TYPE_I32);
++        // cold: mirror image
++        ggml_tensor * cold_f = ggml_add(ctx0,
++            ggml_mul(ctx0, ggml_scale_bias(ctx0, sel_f_cold, 1.0f, -(float) n_hot), m_inv),
++            ggml_mul(ctx0, ggml_scale(ctx0, sel_f_cold2,
++                                      (float) n_cold / (float) n_expert), m));
++        poe_sel_cold = poe_ids_stock_layout(ctx0,
++            ggml_clamp(ctx0, cold_f, 0.0f, (float) (n_cold - 1)),
++            n_expert, n_expert_used, n_tokens);
 +        cb(poe_sel_cold, "ffn_moe_topk_cold", il);
 +
-+        // 1 where the slot is hot, 0 where it is cold: for integer ids,
-+        // clamp(n_hot - id, 0, 1) is exactly that indicator
-+        poe_hot_mask = ggml_clamp(ctx0,
-+            ggml_scale_bias(ctx0, sel_f_mask, -1.0f, (float) n_hot), 0.0f, 1.0f);
-+        poe_hot_mask = ggml_reshape_3d(ctx0, poe_hot_mask, 1, n_expert_used, n_tokens);
++        poe_hot_mask = ggml_reshape_3d(ctx0, m, 1, n_expert_used, n_tokens);
 +        cb(poe_hot_mask, "ffn_moe_hot_mask", il);
++
++        if (getenv("POE_SPLIT_DEBUG") && il == 0) {
++            fprintf(stderr, "POE hot   ids: ne=[%lld,%lld] nb=[%zu,%zu] type=%d\n",
++                    (long long) selected_experts->ne[0], (long long) selected_experts->ne[1],
++                    selected_experts->nb[0], selected_experts->nb[1],
++                    (int) selected_experts->type);
++        }
++
++
 +    }
 +    if (poe_hot_only) {
 +        const int64_t n_hot = down_exps->ne[2];
-+        selected_experts = ggml_cast(ctx0,
-+            ggml_clamp(ctx0, ggml_cast(ctx0, ggml_cont(ctx0, selected_experts),
-+                                       GGML_TYPE_F32),
-+                       0.0f, (float) (n_hot - 1)), GGML_TYPE_I32);
++        ggml_tensor * poe_f = ggml_cast(ctx0, ggml_cont(ctx0, selected_experts),
++                                        GGML_TYPE_F32);
++        if (getenv("POE_ZERO_IDS")) {
++            poe_f = ggml_scale(ctx0, poe_f, 0.0f);   // every slot -> expert 0
++        } else {
++            poe_f = ggml_clamp(ctx0, poe_f, 0.0f, (float) (n_hot - 1));
++        }
++        selected_experts = poe_ids_stock_layout(ctx0, poe_f,
++            n_expert, n_expert_used, n_tokens);
++        if (getenv("POE_SPLIT_DEBUG") && il == 0) {
++            fprintf(stderr, "POE hot-only ids: ne=[%lld,%lld] nb=[%zu,%zu] "
++                    "n_hot=%lld n_expert=%lld zero=%d\n",
++                    (long long) selected_experts->ne[0],
++                    (long long) selected_experts->ne[1],
++                    selected_experts->nb[0], selected_experts->nb[1],
++                    (long long) n_hot, (long long) n_expert,
++                    getenv("POE_ZERO_IDS") ? 1 : 0);
++        }
 +        cb(selected_experts, "ffn_moe_topk_hot_only", il);
 +    }
 +    ggml_tensor * poe_moe_in = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
@@ -182,7 +242,7 @@ index 2be3b75..faf1c4b 100644
  
      if (weight_before_ffn) {
          // repeat cur to [n_embd, n_expert_used, n_tokens]
-@@ -2086,6 +2185,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2086,6 +2245,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
  
      ggml_tensor * up = nullptr;
      ggml_tensor * experts = nullptr;
@@ -200,7 +260,7 @@ index 2be3b75..faf1c4b 100644
  
      if (gate_up_exps) {
          // merged gate_up path: one mul_mat_id, then split into gate and up views
-@@ -2222,6 +2332,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2222,6 +2392,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(experts, "ffn_moe_down_biased", il);
      }
  
@@ -222,7 +282,7 @@ index 2be3b75..faf1c4b 100644
      if (!weight_before_ffn) {
          experts = ggml_mul(ctx0, experts, weights);
          cb(experts, "ffn_moe_weighted", il);
-@@ -2233,8 +2358,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2233,8 +2418,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
  
      assert(n_expert_used > 0);
  
@@ -239,7 +299,7 @@ index 2be3b75..faf1c4b 100644
          cur_experts[i] = ggml_view_2d(ctx0, experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1]);
  
          ggml_build_forward_expand(gf, cur_experts[i]);
-@@ -2246,13 +2378,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2246,13 +2438,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      //       ref: https://github.com/ggml-org/llama.cpp/pull/14753
      ggml_tensor * moe_out = cur_experts[0];
  
