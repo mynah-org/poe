@@ -52,6 +52,16 @@ typedef struct {
     uint32_t routers_permuted;
     uint64_t bytes_written, bytes_before;
     double   hot_bits, cold_bits, mean_bits;
+
+    /* Share of routed (token, slot) pairs that land on a hot expert, from
+     * the profile's own selection counts. This is what decides how the
+     * runtime should consume the split: near 1.0 means a fixed hot/cold
+     * quota would rarely displace the router's real choice, which is the
+     * variant that costs no throughput; well below it means the cold pass
+     * carries real traffic and cannot be skimped. */
+    double   hot_slot_share, hot_slot_share_min, hot_slot_share_max;
+    uint32_t hot_slot_share_min_layer;
+
     int      ranked_by_reap;
 } poe_split_stats;
 

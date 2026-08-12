@@ -122,6 +122,30 @@ int poe_split(const poe_model *m, const poe_split_opts *o, const char *out_path,
             return fail(err, errsz, "the profile carries no ranking signal");
         }
         st.ranked_by_reap = used;
+
+        /* how much of this layer's routing actually lands in the hot set */
+        if (o->profile->sel_count != NULL) {
+            uint64_t hot_slots = 0, all_slots = 0;
+            const uint32_t *row = order + (size_t)l * E;
+            for (uint32_t i = 0; i < E; i++) {
+                const uint64_t c =
+                    o->profile->sel_count[(size_t)l * E + row[i]];
+                all_slots += c;
+                if (i < (uint32_t)((double)E * o->hot_fraction + 0.5))
+                    hot_slots += c;
+            }
+            if (all_slots) {
+                const double share = (double)hot_slots / (double)all_slots;
+                st.hot_slot_share += share;
+                if (l == 0 || share < st.hot_slot_share_min) {
+                    st.hot_slot_share_min = share;
+                    st.hot_slot_share_min_layer = l;
+                }
+                if (l == 0 || share > st.hot_slot_share_max)
+                    st.hot_slot_share_max = share;
+            }
+        }
+
         if (o->invert) {                 /* the control: keep the least needed */
             uint32_t *row = order + (size_t)l * E;
             for (uint32_t i = 0; i < E / 2; i++) {
@@ -131,6 +155,8 @@ int poe_split(const poe_model *m, const poe_split_opts *o, const char *out_path,
             }
         }
     }
+
+    if (L) st.hot_slot_share /= (double)L;
 
     /* ── plan the output tensor table ───────────────────────────────────── */
     const size_t T = ingot_gguf_count(g);

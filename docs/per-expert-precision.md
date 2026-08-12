@@ -148,7 +148,31 @@ precision at 3.438 bits gives 58% less in-domain damage than uniform for a
 in-domain gain for a 7.2× penalty.
 
 **Consequence for M9b.** The runtime work — splitting each slab into a hot
-and a cold tensor, two `mul_mat_id` passes with a router-id remap, a merge
-on the hot path — now has a measured payoff to justify it, which it did not
-have this morning. It should be built for the single-domain case POE exists
-to serve, and it must never be shipped as a general-purpose quant.
+and a cold tensor, two `mul_mat_id` passes, a merge on the hot path — now
+has a measured payoff to justify it, which it did not have this morning. It
+should be built for the single-domain case POE exists to serve, and it must
+never be shipped as a general-purpose quant.
+
+## What the runtime side costs, measured before building it
+
+A second `mul_mat_id` pass over every slot is the straightforward way to
+consume a split checkpoint, and it doubles the expert work. On GB10, with
+the expert budget doubled from 8 to 16 (the same amount of extra work, no
+patch required to measure it):
+
+| | tg128 | vs K=8 |
+|---|---|---|
+| K=8 | 63.63 ±0.60 t/s | — |
+| K=16 | 55.30 ±0.15 t/s | **−13.1%** |
+
+So the honest trade for the straightforward design is: same bytes, 2.4× less
+in-domain damage, **−13% generation throughput**. That is a good deal for a
+memory-bound target and a bad one for a throughput-bound target, and it is
+the number to beat.
+
+The variant that would cost nothing is a *fixed quota* — route the top few
+within the hot set and the rest within the cold set, keeping the total at
+eight expert evaluations. It buys the bytes for free but displaces some of
+the router's real choices, and how often it would do that is a property of
+the workload, not of the design. `poe split` reports it from the profile:
+the share of routed slots that land in the hot set.

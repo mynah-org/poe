@@ -130,6 +130,16 @@ int poe_cmd_split(int argc, char **argv) {
     printf("ranked by %s\n", st.ranked_by_reap ? "REAP saliency"
                                                : "selection frequency");
     printf("mean      %.4f bits/weight over the routed experts\n", st.mean_bits);
+    if (st.hot_slot_share > 0.0) {
+        printf("routing   %.1f%% of routed slots land in the hot set "
+               "(per layer %.1f%%-%.1f%%, worst layer %u)\n",
+               100.0 * st.hot_slot_share, 100.0 * st.hot_slot_share_min,
+               100.0 * st.hot_slot_share_max, st.hot_slot_share_min_layer);
+        printf("          a runtime that runs both halves for every slot pays\n"
+               "          for the other %.1f%% twice; one with a fixed quota\n"
+               "          pays nothing but displaces some of the router's picks\n",
+               100.0 * (1.0 - st.hot_slot_share));
+    }
     printf("\n%u slabs split, %u router tensors permuted\n",
            st.slabs_split, st.routers_permuted);
     printf("wrote %s   %s  (source %s, %.1f%%)\n", out_path, b2, b1,
