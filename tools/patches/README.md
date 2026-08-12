@@ -79,13 +79,31 @@ git apply /path/to/poe/tools/patches/split-experts.patch
 cmake --build build -j
 ```
 
-### State: correct on CPU, crashes on CUDA
+### State: it runs, and only the large-batch MMQ path is broken
 
-**CPU is validated.** With `CUDA_VISIBLE_DEVICES=""` the split checkpoint
-loads and scores a sane perplexity (1.6442 on the first code chunk), so the
-format, the loading, the clamped ids and the per-slot merge are right.
+The patch works end to end on GPU for **generation**, which is what a split
+checkpoint exists for:
 
-**CUDA fails with an illegal memory access**, and it is localized:
+| | size | tg128 |
+|---|---|---|
+| split, 128 hot at Q4_K + 128 cold at Q2_K | **15.84 GiB** | **57.06 ± 0.21 t/s** |
+| the same model unsplit | 19.29 GiB | 66.51 ± 0.42 t/s |
+
+3.45 GiB smaller for 14.2% slower generation — within noise of the 13.1%
+this cost was predicted to be, from doubling the expert budget as a proxy.
+
+Prefill at a large micro-batch still crashes, because that is the only path
+that reaches MMQ. `-b 8 -ub 8` keeps `mul_mat_id` on the `mul_mat_vec_q`
+kernels and prefill runs fine (`[1]1.6484,[2]1.7515,[3]1.6757,[4]1.6852`),
+which is how quality can be measured while the MMQ path is unfixed.
+
+### The MMQ failure
+
+CPU was validated first: with `CUDA_VISIBLE_DEVICES=""` the split checkpoint
+scores a sane perplexity, so the format, the loading, the clamped ids and the
+per-slot merge are right.
+
+**The large-batch CUDA path fails with an illegal memory access**, localized to:
 
 ```
 Invalid __global__ write of size 4 bytes
