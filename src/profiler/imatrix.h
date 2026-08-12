@@ -31,6 +31,18 @@ typedef enum {
     POE_IMAT_NPROJ
 } poe_imat_proj;
 
+/* One non-MoE weight matrix's statistic, keyed by the tensor's own name.
+ * The routed experts are the part POE needs for its own decisions, but a
+ * whole-model quantize driven by an expert-only file falls back to
+ * unweighted fits everywhere else — attention, embeddings, the dense path.
+ * Closing that is one more accumulator on the same pass. */
+typedef struct {
+    char      name[128];
+    uint32_t  cols;
+    uint64_t  count;             /* rows folded in: llama.cpp's counts[0]   */
+    double   *sum2;              /* [cols]                                  */
+} poe_imat_plain;
+
 typedef struct {
     uint32_t n_layers, n_experts;
     /* Per projection, allocated on first observation because the column
@@ -39,6 +51,10 @@ typedef struct {
     uint32_t  cols[POE_IMAT_NPROJ];
     double   *sum2[POE_IMAT_NPROJ];
     uint64_t *counts[POE_IMAT_NPROJ];
+    /* Non-MoE weight matrices, grown as they are first seen. */
+    poe_imat_plain *plain;
+    size_t    n_plain, cap_plain;
+
     uint64_t  observations;      /* matmul nodes folded in                  */
     uint64_t  nonfinite;         /* squared inputs that were not finite     */
 } poe_imatrix;
@@ -61,6 +77,14 @@ int poe_imatrix_observe(poe_imatrix *m, uint32_t layer, poe_imat_proj proj,
                         uint32_t cols, uint32_t act_rows, uint32_t n_used,
                         uint32_t T, const float *act, const int32_t *ids,
                         uint64_t *bad_ids);
+
+/* Fold in one plain matmul: `wname` is the weight tensor's own GGUF name,
+ * `act` its [cols × rows] contiguous f32 input. Rows are tokens, and every
+ * row counts — which is what llama.cpp's collector records in counts[0] for
+ * a non-MoE tensor. Returns 0, or -1 on a column-count change or an
+ * allocation failure. */
+int poe_imatrix_observe_plain(poe_imatrix *m, const char *wname,
+                              uint32_t cols, uint32_t rows, const float *act);
 
 /* True once any projection has data — lets the runner decide whether an
  * imatrix is worth writing at all. */

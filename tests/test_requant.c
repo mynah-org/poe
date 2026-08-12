@@ -98,7 +98,7 @@ int main(void) {
         }
 
     /* ── the control: every expert degraded through the same type ─────── */
-    poe_requant_opts uni = { INGOT_TYPE_Q4_K, INGOT_TYPE_Q3_K, 1.0, NULL, 0, 0 };
+    poe_requant_opts uni = { INGOT_TYPE_Q4_K, INGOT_TYPE_Q3_K, 1.0, NULL, 0, 0, 0 };
     poe_requant_stats su;
     CHECK(poe_requant(src, &uni, uni_path, &su, err, sizeof err) == 0,
           "uniform arm written (%s)", err[0] ? err : "ok");
@@ -111,7 +111,7 @@ int main(void) {
           "the control emulates %.4f bits/weight", su.emulated_bits);
 
     /* ── the arm under test: half the experts, hard ────────────────────── */
-    poe_requant_opts pe = { INGOT_TYPE_Q4_K, INGOT_TYPE_Q2_K, 0.5, &pr, 0, 0 };
+    poe_requant_opts pe = { INGOT_TYPE_Q4_K, INGOT_TYPE_Q2_K, 0.5, &pr, 0, 0, 0 };
     poe_requant_stats sp;
     CHECK(poe_requant(src, &pe, pe_path, &sp, err, sizeof err) == 0,
           "per-expert arm written (%s)", err[0] ? err : "ok");
@@ -169,6 +169,40 @@ int main(void) {
     free(e_pe); free(e_iv);
     poe_model_close(mo);
     poe_model_close(mi);
+
+    /* Threading must not change a single byte: experts are encoded
+     * independently either way, so one thread and four have to agree. */
+    {
+        poe_requant_opts one = pe, four = pe;
+        one.threads = 1;
+        four.threads = 4;
+        poe_requant_stats s1, s4;
+        const char *p1 = "build/rq-t1.gguf", *p4 = "build/rq-t4.gguf";
+        if (poe_requant(src, &one, p1, &s1, err, sizeof err) == 0 &&
+            poe_requant(src, &four, p4, &s4, err, sizeof err) == 0) {
+            FILE *fa = fopen(p1, "rb"), *fb = fopen(p4, "rb");
+            int same = fa != NULL && fb != NULL;
+            while (same) {
+                const int x = fgetc(fa), y = fgetc(fb);
+                if (x != y) same = 0;
+                if (x == EOF || y == EOF) break;
+            }
+            if (fa) fclose(fa);
+            if (fb) fclose(fb);
+            CHECK(same, "1 thread and 4 produce byte-identical output");
+            CHECK(s1.threads == 1 && s4.threads == 4,
+                  "the thread count is reported (%u vs %u)", s1.threads,
+                  s4.threads);
+            CHECK(s1.experts_degraded == s4.experts_degraded,
+                  "and both degraded the same experts (%llu)",
+                  (unsigned long long)s4.experts_degraded);
+            remove(p1);
+            remove(p4);
+        } else {
+            printf("  FAIL: cannot write the threading arms: %s\n", err);
+            failures++;
+        }
+    }
 
     /* ── guards ────────────────────────────────────────────────────────── */
     poe_requant_opts bad = pe;

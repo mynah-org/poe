@@ -33,7 +33,7 @@ int poe_cmd_requant(int argc, char **argv) {
     const char *model_path = NULL, *out_path = NULL, *profile_path = NULL;
     const char *carrier_arg = NULL, *degrade_arg = NULL;
     double frac = 1.0;
-    int invert = 0, force = 0;
+    int invert = 0, force = 0, threads = 0;
 
     for (int i = 0; i < argc; i++) {
         if      (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
@@ -44,6 +44,8 @@ int poe_cmd_requant(int argc, char **argv) {
             frac = atof(argv[++i]);
             if (frac > 1.0) frac /= 100.0;              /* accept 57% or 0.57 */
         }
+        else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc)
+            threads = atoi(argv[++i]);
         else if (strcmp(argv[i], "--invert") == 0) invert = 1;
         else if (strcmp(argv[i], "--force") == 0) force = 1;
         else if (argv[i][0] == '-') {
@@ -66,6 +68,7 @@ int poe_cmd_requant(int argc, char **argv) {
             "  --degrade-frac   how many experts per layer are degraded (default 1,\n"
             "                   i.e. all of them — the matched-bytes control)\n"
             "  --profile        ranks experts within each layer; required below 1\n"
+            "  --threads N      encoder threads (default: one per core)\n"
             "  --invert         degrade the HOTTEST experts: the control an\n"
             "                   experiment needs, never something to ship\n"
             "\n"
@@ -74,7 +77,7 @@ int poe_cmd_requant(int argc, char **argv) {
         return 2;
     }
 
-    poe_requant_opts o = { 0, 0, frac, NULL, invert, force };
+    poe_requant_opts o = { 0, 0, frac, NULL, invert, force, threads };
     o.carrier_type = type_by_name(carrier_arg);
     o.degrade_type = type_by_name(degrade_arg);
     if (o.carrier_type < 0 || o.degrade_type < 0) {
@@ -121,9 +124,9 @@ int poe_cmd_requant(int argc, char **argv) {
                                                    : "selection counts");
     printf("emulates  %.4f bits/weight over the routed slabs\n",
            st.emulated_bits);
-    printf("\nwrote %s   %s   (%u slabs rewritten, %llu experts degraded)\n",
-           out_path, sz, st.slabs_rewritten,
-           (unsigned long long)st.experts_degraded);
+    printf("\nwrote %s   %s   (%u slabs rewritten, %llu experts degraded, "
+           "%u threads)\n", out_path, sz, st.slabs_rewritten,
+           (unsigned long long)st.experts_degraded, st.threads);
     printf("note: the file is a plain %s checkpoint; the mixed allocation is "
            "emulated,\n      not stored, so this measures quality at a size "
            "the format can hold.\n", ingot_type_name(o.carrier_type));

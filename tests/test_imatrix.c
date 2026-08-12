@@ -152,8 +152,56 @@ int main(int argc, char **argv) {
         remove(again);
     }
 
+    /* ── the dense path ─────────────────────────────────────────────────
+     * An expert-only imatrix leaves a whole-model quantize on unweighted
+     * fits everywhere else, so plain matmuls accumulate too — keyed by the
+     * weight's own name, one row, counts[0] = tokens, which is the shape
+     * llama.cpp writes for a non-MoE tensor. */
+    const float dense[2 * 3] = {
+        1.0f, 2.0f, 3.0f,      /* token 0 */
+        0.0f, 4.0f, 0.0f,      /* token 1 */
+    };
+    CHECK(poe_imatrix_observe_plain(&m, "blk.0.attn_q.weight", 3, 2, dense) == 0,
+          "a plain matmul folds in");
+    CHECK(poe_imatrix_observe_plain(&m, "blk.0.attn_q.weight", 3, 1, dense) == 0,
+          "the same weight accumulates rather than duplicating");
+    CHECK(m.n_plain == 1, "one dense entry so far (%zu)", m.n_plain);
+    CHECK(poe_imatrix_observe_plain(&m, "blk.0.attn_q.weight", 4, 1, dense) != 0,
+          "a column-count change is refused, not averaged");
+    CHECK(feq(m.plain[0].sum2[1], 2.0 * 2.0 + 4.0 * 4.0 + 2.0 * 2.0),
+          "squares accumulate per column (%.1f)", m.plain[0].sum2[1]);
+    CHECK(m.plain[0].count == 3, "every row counts (%llu)",
+          (unsigned long long)m.plain[0].count);
+
+    char withdense[512];
+    snprintf(withdense, sizeof withdense, "%s.dense", out);
+    if (poe_imatrix_write_gguf(&m, withdense, "test-calib.txt", 7, 512,
+                               err, sizeof err) == 0) {
+        ingot_gguf *g3 = NULL;
+        if (ingot_gguf_open(&g3, withdense, err, sizeof err) == 0) {
+            CHECK(ingot_gguf_count(g3) == 2 * 2 * 2 + 2,
+                  "the dense entry joins the expert ones (%zu tensors)",
+                  ingot_gguf_count(g3));
+            const ingot_tensor *dsum =
+                ingot_gguf_find(g3, "blk.0.attn_q.weight.in_sum2");
+            CHECK(dsum != NULL && dsum->ne[0] == 3 && dsum->ne[1] == 1,
+                  "dense in_sum2 is [cols, 1]");
+            const ingot_tensor *dc =
+                ingot_gguf_find(g3, "blk.0.attn_q.weight.counts");
+            const float *cv = dc ? ingot_gguf_data(g3, dc) : NULL;
+            CHECK(cv != NULL && feq(cv[0], 3.0),
+                  "dense counts carry the token total");
+            ingot_gguf_close(g3);
+        }
+        remove(withdense);
+    } else {
+        printf("  FAIL: cannot write the artifact with dense entries: %s\n", err);
+        failures++;
+    }
+
     poe_imatrix_free(&m);
     CHECK(m.sum2[POE_IMAT_GATE] == NULL, "free clears the accumulator");
+    CHECK(m.plain == NULL && m.n_plain == 0, "and clears the dense entries");
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures != 0;

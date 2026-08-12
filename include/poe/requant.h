@@ -46,6 +46,7 @@ typedef struct {
     const poe_profile *profile; /* ranking source; NULL only when f == 1.0   */
     int    invert;              /* degrade the HOTTEST experts instead       */
     int    force;               /* accept a profile from another checkpoint  */
+    int    threads;             /* 0 = one per online core                   */
 } poe_requant_opts;
 
 typedef struct {
@@ -56,6 +57,7 @@ typedef struct {
     uint64_t bytes_written;
     double   emulated_bits;     /* average bits/weight the map emulates      */
     double   carrier_bits, degrade_bits;
+    uint32_t threads;
     int      ranked_by_reap;    /* 0 = selection counts, 1 = REAP saliency   */
 } poe_requant_stats;
 

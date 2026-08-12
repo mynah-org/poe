@@ -58,7 +58,9 @@ typedef struct {
      * they get their own buffers rather than sharing the scratch. */
     poe_imatrix imat;
     int       capture_imat;
+    int       capture_imat_all;      /* also the dense path: attention, ffn */
     uint64_t  imat_skipped;          /* nodes whose input could not be read */
+    uint64_t  imat_plain_seen;       /* non-MoE matmuls folded in           */
     float    *imat_act;
     size_t    imat_act_cap;
     int32_t  *imat_ids;
@@ -138,6 +140,40 @@ static int fetch_act(observer *ob, const struct ggml_tensor *t, float *dst) {
     return 0;
 }
 
+/* A plain matmul against a model weight. src[0] carries the GGUF tensor's
+ * own name, which is the key llama-quantize looks entries up by; anything
+ * not ending in ".weight" is an intermediate, not a weight to be quantized.
+ *
+ * Expert slabs never come through here — they are MUL_MAT_ID — so the two
+ * capture paths cannot double-count the same tensor. */
+static const char *plain_weight_name(const observer *ob,
+                                     const struct ggml_tensor *t) {
+    if (!ob->capture_imat_all || t->op != GGML_OP_MUL_MAT) return NULL;
+    const struct ggml_tensor *w = t->src[0], *x = t->src[1];
+    if (w == NULL || x == NULL || x->type != GGML_TYPE_F32) return NULL;
+    const size_t n = strlen(w->name);
+    if (n < 7 || strcmp(w->name + n - 7, ".weight") != 0) return NULL;
+    return w->name;
+}
+
+static void capture_plain(observer *ob, const struct ggml_tensor *t,
+                          const char *wname) {
+    const struct ggml_tensor *x = t->src[1];
+    const size_t cols = (size_t)x->ne[0];
+    const size_t rows = (size_t)x->ne[1] * (size_t)x->ne[2];
+    if (cols == 0 || rows == 0) { ob->imat_skipped++; return; }
+    float *act = grow(ob->imat_act, &ob->imat_act_cap,
+                      cols * rows * sizeof *ob->imat_act);
+    if (act == NULL) { ob->imat_skipped++; return; }
+    ob->imat_act = act;
+    if (fetch_act(ob, x, act) != 0 ||
+        poe_imatrix_observe_plain(&ob->imat, wname, (uint32_t)cols,
+                                  (uint32_t)rows, act) != 0)
+        ob->imat_skipped++;
+    else
+        ob->imat_plain_seen++;
+}
+
 /* Which routed projection a graph node belongs to, or -1. Only the three
  * MUL_MAT_ID nodes carry expert inputs worth an imatrix. */
 static int imat_proj_of(const char *kind) {
@@ -194,9 +230,18 @@ static bool moe_cb(struct ggml_tensor *t, bool ask, void *ud) {
     char kind[32];
     uint32_t layer;
 
-    if (parse_moe_name(t->name, kind, sizeof kind, &layer) != 0)
-        return !ask;                       /* not ours; never abort compute */
-    if (layer >= ob->n_layers) return !ask;
+    const char *wname = plain_weight_name(ob, t);
+    if (parse_moe_name(t->name, kind, sizeof kind, &layer) != 0 ||
+        layer >= ob->n_layers) {
+        /* not a MoE node: the only thing left worth reading is a dense
+         * weight matmul, and only when the imatrix should cover it */
+        if (wname == NULL) return !ask;    /* never abort compute */
+        if (ask) return true;
+        /* deliberately not counted in tensors_seen: that counter guards
+         * "no ffn_moe_* nodes observed", and dense hits must not mask it */
+        capture_plain(ob, t, wname);
+        return true;
+    }
 
     int is_probs = strcmp(kind, "probs") == 0;
     int is_topk  = strcmp(kind, "topk") == 0;
@@ -205,9 +250,13 @@ static bool moe_cb(struct ggml_tensor *t, bool ask, void *ud) {
     int iproj    = (ob->capture_imat && t->op == GGML_OP_MUL_MAT_ID)
                  ? imat_proj_of(kind) : -1;
 
-    if (ask) return is_probs || is_topk || is_down || iproj >= 0 || wprio > 0;
+    if (ask) return is_probs || is_topk || is_down || iproj >= 0 ||
+                    wprio > 0 || wname != NULL;
 
     ob->tensors_seen++;
+
+    /* the router matmul is a MoE-named node and a plain weight matmul both */
+    if (wname != NULL) capture_plain(ob, t, wname);
 
     /* The imatrix reads this node's INPUT, so it coexists with the REAP
      * capture of the down node's output: fold it in, then fall through. */
@@ -375,13 +424,16 @@ static void usage(void) {
     fprintf(stderr,
         "usage: poe-profile <model.gguf> --dataset <file.txt|file.jsonl>\n"
         "                   [--metric routing|reap|imatrix] [-o out.poeprofile]\n"
-        "                   [--imatrix-out out.imatrix.gguf]\n"
+        "                   [--imatrix-out out.imatrix.gguf] [--imatrix-all]\n"
         "                   [--max-tokens N] [--batch N] [--ngl N] [--threads N]\n"
         "                   [--until-stable S] [--stable-windows K] [--bottom F]\n"
         "\n"
         "  --metric routing   selection counts, gate stats, entropy, mass-K (cheap)\n"
         "  --metric reap      the above plus expert-output norms for REAP saliency\n"
         "                     (captures ffn_moe_down: slower, ~n_embd*k*4 B/token/layer)\n"
+        "  --imatrix-all      cover the dense path too (attention, embeddings,\n"
+        "                     router): an expert-only imatrix leaves a whole-model\n"
+        "                     quantize on unweighted fits everywhere else\n"
         "  --metric imatrix   routing plus per-expert activation statistics, written\n"
         "                     as llama.cpp's GGUF imatrix (feeds llama-quantize\n"
         "                     --imatrix, and any bit allocation that weights by\n"
@@ -397,6 +449,7 @@ static void usage(void) {
 int main(int argc, char **argv) {
     const char *model_path = NULL, *dataset_path = NULL, *out_path = NULL;
     const char *metric = "routing", *imat_path = NULL;
+    int imat_all = 0;
     long max_tokens = 8192, n_batch = 2048, ngl = 999, n_threads = 0;
     double until_stable = 0.0, bottom_frac = 0.25;
     long stable_windows = 2;
@@ -406,6 +459,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)        out_path = argv[++i];
         else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc)  metric = argv[++i];
         else if (strcmp(argv[i], "--imatrix-out") == 0 && i + 1 < argc) imat_path = argv[++i];
+        else if (strcmp(argv[i], "--imatrix-all") == 0) imat_all = 1;
         else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) max_tokens = atol(argv[++i]);
         else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc)   n_batch = atol(argv[++i]);
         else if (strcmp(argv[i], "--ngl") == 0 && i + 1 < argc)     ngl = atol(argv[++i]);
@@ -453,6 +507,7 @@ int main(int argc, char **argv) {
     ob.probs_are_logits = strcmp(pm->arch, "gpt-oss") == 0;
     ob.capture_down = strcmp(metric, "reap") == 0;
     ob.capture_imat = strcmp(metric, "imatrix") == 0;
+    ob.capture_imat_all = ob.capture_imat && imat_all;
     if (ob.capture_imat &&
         poe_imatrix_init(&ob.imat, ob.n_layers, ob.n_experts) != 0) {
         fprintf(stderr, "poe-profile: cannot initialise the imatrix\n");
@@ -583,6 +638,8 @@ int main(int argc, char **argv) {
     if (ob.capture_imat)
         fprintf(stderr, ", %llu imatrix captures skipped",
                 (unsigned long long)ob.imat_skipped);
+    if (ob.capture_imat_all)
+        fprintf(stderr, ", %zu dense weights covered", ob.imat.n_plain);
     fprintf(stderr, "\n");
 
     if (ob.tensors_seen == 0) {

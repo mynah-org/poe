@@ -2,12 +2,62 @@
  * SPDX-License-Identifier: MIT */
 #include "poe/requant.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "ingot.h"
 #include "ggufw.h"
+
+/* One thread's share of a slab: a contiguous range of experts, degraded if
+ * cold and then encoded at the carrier. Experts are the natural unit —
+ * each is a whole number of quantization blocks (checked before any work
+ * starts), so encoding them separately is bit-identical to encoding the
+ * slab in one call, and every thread writes a disjoint byte range. */
+typedef struct {
+    const poe_requant_opts *o;
+    float         *fbuf;
+    uint8_t       *cbuf;
+    const uint8_t *cold;
+    uint64_t       per_expert, carrier_bytes, degrade_bytes;
+    uint32_t       first, last;
+    uint64_t       degraded;
+    int            rc;
+} slab_job;
+
+static void *slab_worker(void *arg) {
+    slab_job *j = arg;
+    uint8_t *dbuf = j->degrade_bytes ? malloc((size_t)j->degrade_bytes) : NULL;
+    if (j->degrade_bytes && dbuf == NULL) { j->rc = -1; return NULL; }
+    for (uint32_t e = j->first; e < j->last && j->rc == 0; e++) {
+        float *slice = j->fbuf + (uint64_t)e * j->per_expert;
+        if (j->cold[e]) {
+            if (ingot_quantize(j->o->degrade_type, slice,
+                               (size_t)j->per_expert, dbuf) != 0 ||
+                ingot_dequant(j->o->degrade_type, dbuf,
+                              (size_t)j->per_expert, slice) != 0) {
+                j->rc = -1;
+                break;
+            }
+            j->degraded++;
+        }
+        if (ingot_quantize(j->o->carrier_type, slice, (size_t)j->per_expert,
+                           j->cbuf + (uint64_t)e * j->carrier_bytes) != 0)
+            j->rc = -1;
+    }
+    free(dbuf);
+    return NULL;
+}
+
+static uint32_t thread_count(int requested, uint32_t experts) {
+    long n = requested > 0 ? requested : sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+    if (n > 64) n = 64;
+    if ((uint32_t)n > experts) n = (long)experts;
+    return (uint32_t)n;
+}
 
 static int fail(char *err, size_t errsz, const char *msg) {
     if (err && errsz) snprintf(err, errsz, "%s", msg);
@@ -74,7 +124,8 @@ static int mark_cold(uint8_t *cold, const poe_profile *pr, uint32_t L,
 int poe_requant(const poe_model *m, const poe_requant_opts *o,
                 const char *out_path, poe_requant_stats *stats,
                 char *err, size_t errsz) {
-    poe_requant_stats st = { 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0 };
+    poe_requant_stats st;
+    memset(&st, 0, sizeof st);
     if (stats) *stats = st;
     if (m == NULL || o == NULL || out_path == NULL)
         return fail(err, errsz, "bad arguments");
@@ -264,15 +315,23 @@ int poe_requant(const poe_model *m, const poe_requant_opts *o,
     const uint64_t data_base = poe_align_up(24 + kv_out_bytes + infos.n, align);
 
     /* one slab-sized set of buffers, reused for every tensor */
-    uint64_t car_max = 0, deg_max = 0;
+    uint64_t car_max = 0;
     ingot_type_nbytes(o->carrier_type, max_nelem, &car_max);
-    ingot_type_nbytes(o->degrade_type, max_nelem / E, &deg_max);
     float   *fbuf = malloc((size_t)max_nelem * sizeof *fbuf);
     uint8_t *cbuf = malloc((size_t)car_max);
-    uint8_t *dbuf = malloc((size_t)deg_max);
     FILE    *fout = fopen(out_path, "wb");
+
+    /* Warm any lazily-initialized CPU dispatch before threads exist, so the
+     * first parallel encode is not also the one that initializes it. */
+    (void)ingot_cpu();
+    const uint32_t n_threads = thread_count(o->threads, E);
+    slab_job  *jobs = calloc(n_threads, sizeof *jobs);
+    pthread_t *tids = calloc(n_threads, sizeof *tids);
+    st.threads = n_threads;
+
     int rc = -1;
-    if (fbuf == NULL || cbuf == NULL || dbuf == NULL || fout == NULL) {
+    if (fbuf == NULL || cbuf == NULL || jobs == NULL || tids == NULL ||
+        fout == NULL) {
         fail(err, errsz, fout == NULL ? "cannot create the output file"
                                       : "out of memory");
         goto done;
@@ -317,24 +376,48 @@ int poe_requant(const poe_model *m, const poe_requant_opts *o,
         }
         const uint64_t per_expert = t->nelem / E;
         const uint8_t *layer_cold = cold + (size_t)owner[i]->block * E;
-        for (uint32_t e = 0; e < E; e++) {
-            if (!layer_cold[e]) continue;
-            float *slice = fbuf + (uint64_t)e * per_expert;
-            if (ingot_quantize(o->degrade_type, slice, (size_t)per_expert,
-                               dbuf) != 0 ||
-                ingot_dequant(o->degrade_type, dbuf, (size_t)per_expert,
-                              slice) != 0) {
-                snprintf(err, errsz, "cannot re-encode an expert of '%s' as %s",
-                         t->name, ingot_type_name(o->degrade_type));
-                goto done;
-            }
-            st.experts_degraded++;
+        int layer_has_cold = 0;
+        for (uint32_t e = 0; e < E && !layer_has_cold; e++)
+            layer_has_cold = layer_cold[e];
+        uint64_t per_expert_carrier = 0, per_expert_degrade = 0, nb = 0;
+        if (ingot_type_nbytes(o->carrier_type, per_expert, &per_expert_carrier) != 0 ||
+            ingot_type_nbytes(o->degrade_type, per_expert, &per_expert_degrade) != 0 ||
+            ingot_type_nbytes(o->carrier_type, t->nelem, &nb) != 0 ||
+            per_expert_carrier * E != nb) {
+            snprintf(err, errsz, "'%s' does not split evenly into per-expert "
+                     "encodings", t->name);
+            goto done;
         }
-        uint64_t nb = 0;
-        if (ingot_quantize(o->carrier_type, fbuf, (size_t)t->nelem, cbuf) != 0 ||
-            ingot_type_nbytes(o->carrier_type, t->nelem, &nb) != 0) {
-            snprintf(err, errsz, "cannot encode '%s' as %s", t->name,
-                     ingot_type_name(o->carrier_type));
+
+        /* One pass over the experts, spread across cores: a 20 GB rewrite is
+         * an hour on one core and minutes on twenty, and the work is
+         * embarrassingly parallel. */
+        for (uint32_t w = 0; w < n_threads; w++) {
+            jobs[w] = (slab_job){ o, fbuf, cbuf, layer_cold, per_expert,
+                                  per_expert_carrier,
+                                  layer_has_cold ? per_expert_degrade : 0,
+                                  (uint32_t)((uint64_t)E * w / n_threads),
+                                  (uint32_t)((uint64_t)E * (w + 1) / n_threads),
+                                  0, 0 };
+        }
+        for (uint32_t w = 1; w < n_threads; w++)
+            if (pthread_create(&tids[w], NULL, slab_worker, &jobs[w]) != 0) {
+                slab_worker(&jobs[w]);            /* run it here instead */
+                tids[w] = 0;
+            }
+        slab_worker(&jobs[0]);
+        for (uint32_t w = 1; w < n_threads; w++)
+            if (tids[w] != 0) pthread_join(tids[w], NULL);
+
+        int worker_rc = 0;
+        for (uint32_t w = 0; w < n_threads; w++) {
+            worker_rc |= jobs[w].rc;
+            st.experts_degraded += jobs[w].degraded;
+        }
+        if (worker_rc != 0) {
+            snprintf(err, errsz, "cannot re-encode '%s' (%s carrier, %s "
+                     "degrade)", t->name, ingot_type_name(o->carrier_type),
+                     ingot_type_name(o->degrade_type));
             goto done;
         }
         if (poe_wput(fout, cbuf, (size_t)nb) != 0) goto wfail;
@@ -357,7 +440,7 @@ done:
             rc = fail(err, errsz, "writing the output file failed");
         if (rc != 0) remove(out_path);
     }
-    free(fbuf); free(cbuf); free(dbuf);
+    free(fbuf); free(cbuf); free(jobs); free(tids);
     free(owner); free(cold); free(spans); free(prov.p); free(infos.p);
     if (rc == 0 && stats) *stats = st;
     return rc;

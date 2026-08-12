@@ -30,12 +30,56 @@ void poe_imatrix_free(poe_imatrix *m) {
         free(m->sum2[p]);
         free(m->counts[p]);
     }
+    for (size_t i = 0; i < m->n_plain; i++) free(m->plain[i].sum2);
+    free(m->plain);
     memset(m, 0, sizeof *m);
 }
 
 int poe_imatrix_has_data(const poe_imatrix *m) {
     for (int p = 0; p < POE_IMAT_NPROJ; p++)
         if (m->sum2[p] != NULL) return 1;
+    return m->n_plain > 0;
+}
+
+int poe_imatrix_observe_plain(poe_imatrix *m, const char *wname,
+                              uint32_t cols, uint32_t rows, const float *act) {
+    if (m == NULL || wname == NULL || act == NULL) return -1;
+    if (cols == 0 || rows == 0) return -1;
+    if (strlen(wname) + 1 > sizeof m->plain[0].name) return -1;
+
+    poe_imat_plain *e = NULL;
+    for (size_t i = 0; i < m->n_plain; i++)
+        if (strcmp(m->plain[i].name, wname) == 0) { e = &m->plain[i]; break; }
+
+    if (e == NULL) {
+        if (m->n_plain == m->cap_plain) {
+            const size_t cap = m->cap_plain ? m->cap_plain * 2 : 64;
+            poe_imat_plain *q = realloc(m->plain, cap * sizeof *q);
+            if (q == NULL) return -1;
+            m->plain = q;
+            m->cap_plain = cap;
+        }
+        e = &m->plain[m->n_plain];
+        memset(e, 0, sizeof *e);
+        snprintf(e->name, sizeof e->name, "%s", wname);
+        e->cols = cols;
+        e->sum2 = calloc(cols, sizeof *e->sum2);
+        if (e->sum2 == NULL) return -1;
+        m->n_plain++;
+    } else if (e->cols != cols) {
+        return -1;    /* two widths under one name would be silent garbage */
+    }
+
+    for (uint32_t r = 0; r < rows; r++) {
+        const float *x = act + (size_t)r * cols;
+        for (uint32_t j = 0; j < cols; j++) {
+            const double v = (double)x[j] * (double)x[j];
+            if (!isfinite(v)) { m->nonfinite++; continue; }
+            e->sum2[j] += v;
+        }
+        e->count++;
+    }
+    m->observations++;
     return 0;
 }
 
@@ -91,7 +135,7 @@ int poe_imatrix_observe(poe_imatrix *m, uint32_t layer, poe_imat_proj proj,
 /* One GGUF tensor to emit: the name, and the f32 payload the writer borrows
  * until save() (ingot does not copy tensor data). */
 typedef struct {
-    char   name[128];
+    char   name[160];      /* a weight name plus ".in_sum2", never truncated */
     float *data;
     uint64_t ne[2];
 } entry;
@@ -113,8 +157,9 @@ int poe_imatrix_write_gguf(const poe_imatrix *m, const char *path,
         return -1;
     }
 
-    /* Two tensors per (layer, projection) that has data. */
-    size_t cap = 0;
+    /* Two tensors per (layer, projection) that has data, plus two per
+     * non-MoE weight matrix. */
+    size_t cap = m->n_plain * 2;
     for (int p = 0; p < POE_IMAT_NPROJ; p++)
         if (m->sum2[p]) cap += (size_t)m->n_layers * 2;
 
@@ -159,6 +204,32 @@ int poe_imatrix_write_gguf(const poe_imatrix *m, const char *path,
                 cnt->data[e] = (float)m->counts[p][base + e];
             }
         }
+    }
+
+    /* Non-MoE matrices: one row, and counts[0] is the token count, which is
+     * exactly the shape llama.cpp writes for a plain matmul. */
+    for (size_t i = 0; i < m->n_plain; i++) {
+        const poe_imat_plain *src = &m->plain[i];
+
+        entry *sums = &entries[n++];
+        snprintf(sums->name, sizeof sums->name, "%s.in_sum2", src->name);
+        sums->ne[0] = src->cols;
+        sums->ne[1] = 1;
+        sums->data = malloc((size_t)src->cols * sizeof *sums->data);
+
+        entry *cnt = &entries[n++];
+        snprintf(cnt->name, sizeof cnt->name, "%s.counts", src->name);
+        cnt->ne[0] = 1;
+        cnt->ne[1] = 1;
+        cnt->data = malloc(sizeof *cnt->data);
+
+        if (sums->data == NULL || cnt->data == NULL) {
+            fail(err, errsz, "out of memory");
+            goto done;
+        }
+        for (uint32_t j = 0; j < src->cols; j++)
+            sums->data[j] = (float)src->sum2[j];
+        cnt->data[0] = (float)src->count;
     }
 
     qsort(entries, n, sizeof *entries, entry_cmp);
