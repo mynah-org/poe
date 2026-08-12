@@ -22,6 +22,7 @@ void poe_profile_free(poe_profile *p) {
         free(p->mass_k[i]);
         free(p->mass_k_hist[i]);
     }
+    free(p->topk_mass);
     free(p->sel_count);
     free(p->gate_mean);
     free(p->reap_mean);
@@ -107,6 +108,10 @@ int poe_profile_load(poe_profile **out, const char *path,
 
         p->layer_tokens[li] = poe_json_u64(poe_json_get(lj, "tokens"), 0);
         p->entropy_bits[li] = poe_json_num(poe_json_get(lj, "entropy_bits_mean"), 0.0);
+
+        if (p->topk_mass == NULL) p->topk_mass = calloc(L, sizeof *p->topk_mass);
+        if (p->topk_mass != NULL)
+            p->topk_mass[li] = poe_json_num(poe_json_get(lj, "topk_mass_mean"), 0.0);
 
         const poe_json *mh = poe_json_get(lj, "mass_k_hist");
         for (int i = 0; mh != NULL && i < POE_PROFILE_NMASS; i++) {

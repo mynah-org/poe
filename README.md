@@ -22,7 +22,7 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 |---|---|
 | `poe inspect` | ✅ static MoE structure, storage accounting, theoretical reductions |
 | `poe experts` | ✅ expert tensor mapping and sizes |
-| `poe routing-budget` | ✅ exact active-parameter accounting per routed-K |
+| `poe routing-budget` | ✅ exact active-parameter accounting per routed-K; with `--profile`, the per-token distribution of how many experts the router's mass actually needs (and how much mass the applied top-k holds) |
 | `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K; `--metric reap` adds streaming REAP saliency (gate × expert-output norm); `--metric imatrix` adds per-expert activation statistics, written as llama.cpp's GGUF imatrix (`--imatrix-all` covers the dense path too: 511 entries on Qwen3.6, against the 510 the checkpoint's own metadata records); `--until-stable` stops calibration when the prune decision converges |
 | `poe compare` | ✅ expert-fingerprint overlap between workload profiles: Jaccard / weighted Jaccard / Spearman / JS divergence, exclusive and cold experts, REAP prune-set agreement |
 | `poe plan` | ✅ deterministic expert-removal plans from weighted profiles (`reap` / `frequency` / `gate`), exact byte accounting, conservative guards ([format](docs/poeplan.md)) |

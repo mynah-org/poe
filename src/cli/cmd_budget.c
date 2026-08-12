@@ -103,6 +103,22 @@ static void print_mass_k(const poe_profile *pr) {
                thr[i] * 100.0, mean, q[0], q[1], q[2], maxk,
                100.0 * (double)at_or_below / (double)total);
     }
+    if (pr->topk_mass != NULL) {
+        double sum = 0;
+        uint32_t n = 0;
+        double lo = 1.0, hi = 0.0;
+        for (uint32_t l = 0; l < pr->n_layers; l++) {
+            if (pr->topk_mass[l] <= 0.0) continue;
+            sum += pr->topk_mass[l];
+            if (pr->topk_mass[l] < lo) lo = pr->topk_mass[l];
+            if (pr->topk_mass[l] > hi) hi = pr->topk_mass[l];
+            n++;
+        }
+        if (n)
+            printf("\n  the top-%u the model actually runs holds %.1f%% of the "
+                   "mass   (per layer %.1f%%-%.1f%%)\n",
+                   pr->top_k, 100.0 * sum / n, 100.0 * lo, 100.0 * hi);
+    }
     printf("\n  A fixed K must be set for the tail, so the gap between p50 and p99\n"
            "  is what token-adaptive routing could recover — and nothing else can.\n");
 }

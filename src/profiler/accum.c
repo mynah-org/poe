@@ -39,8 +39,10 @@ int poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,
     a->tok_probs   = calloc(n_layers, sizeof *a->tok_probs);
     a->tok_sel     = calloc(n_layers, sizeof *a->tok_sel);
     a->entropy_sum = calloc(n_layers, sizeof *a->entropy_sum);
+    a->topk_mass_sum = calloc(n_layers, sizeof *a->topk_mass_sum);
     int ok = a->sel_count && a->gate_sum && a->reap_count && a->reap_sum &&
-             a->norm_sum && a->tok_probs && a->tok_sel && a->entropy_sum;
+             a->norm_sum && a->tok_probs && a->tok_sel && a->entropy_sum &&
+             a->topk_mass_sum;
     for (int i = 0; i < POE_ACCUM_NMASS; i++) {
         a->mass_k_sum[i] = calloc(n_layers, sizeof *a->mass_k_sum[i]);
         a->mass_k_hist[i] = calloc((size_t)n_layers * POE_ACCUM_KHIST,
@@ -64,6 +66,7 @@ void poe_accum_free(poe_accum *a) {
         free(a->mass_k_sum[i]);
         free(a->mass_k_hist[i]);
     }
+    free(a->topk_mass_sum);
     memset(a, 0, sizeof *a);
 }
 
@@ -103,8 +106,14 @@ void poe_accum_observe_probs(poe_accum *a, uint32_t layer, uint32_t T,
             if (row[e] > 0.0f) h -= (double)row[e] * log2((double)row[e]);
         a->entropy_sum[layer] += h;
 
-        /* min-k to reach each cumulative-mass threshold */
+        /* min-k to reach each cumulative-mass threshold, and — the mirror
+         * question — how much mass the top-k the model actually runs holds */
         qsort(row, E, sizeof *row, cmp_desc);
+        if (a->top_k > 0 && a->topk_mass_sum != NULL) {
+            double topk = 0.0;
+            for (uint32_t e = 0; e < a->top_k && e < E; e++) topk += row[e];
+            a->topk_mass_sum[layer] += topk;
+        }
         double cum = 0.0;
         uint32_t k = 0;
         int ti = 0;
@@ -213,6 +222,8 @@ void poe_accum_write_json(const poe_accum *a, FILE *f, const char *indent) {
         fprintf(f, "},\n");
 
         /* the distribution behind that mean, 1..32 experts plus "more" */
+        fprintf(f, "%s   \"topk_mass_mean\": %.6f,\n", indent,
+                tp && a->topk_mass_sum ? a->topk_mass_sum[l] / (double)tp : 0.0);
         fprintf(f, "%s   \"mass_k_hist\": {", indent);
         for (int i = 0; i < POE_ACCUM_NMASS; i++) {
             fprintf(f, "%s\"%.2f\": [", i ? ", " : "",

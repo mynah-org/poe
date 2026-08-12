@@ -59,7 +59,8 @@ typedef struct {
     uint64_t *tok_sel;        /* tokens whose selection was observed           */
     double   *entropy_sum;    /* Σ over tokens of H(p) in bits                 */
     double   *mass_k_sum[POE_ACCUM_NMASS]; /* Σ of min-k reaching threshold    */
-    uint64_t *mass_k_hist[POE_ACCUM_NMASS];/* [layer][bin], bin 32 = "more"    */
+    uint64_t *mass_k_hist[POE_ACCUM_NMASS];/* [layer][bin], see khist_bin      */
+    double   *topk_mass_sum;  /* Σ of the probability the applied top-k holds  */
 } poe_accum;
 
 /* Which histogram bin a min-k of `k` out of `n_experts` lands in. Exposed

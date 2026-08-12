@@ -124,3 +124,45 @@ mass T". If that distribution is tight, adaptivity dies with the schedule; if
 it is wide, adaptivity has headroom a static schedule structurally cannot
 reach. One observer field answers it, and it should be answered before any
 runtime work.
+
+## R9 — that histogram, measured: adaptivity by probability mass is dead
+
+`poe-profile --metric routing` now keeps the whole distribution of min-k per
+mass threshold, and `poe routing-budget --profile` reports it. Qwen3.6, 8192
+tokens, 40 layers pooled, bins 4 experts wide:
+
+| mass | mean | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|
+| 80% | 140.9 | 144 | 156 | 164 | 180 |
+| 90% | 180.2 | 180 | 192 | 200 | 212 |
+| 95% | 206.9 | 208 | 216 | 224 | 232 |
+| 99% | 239.5 | 240 | 244 | 248 | 252 |
+
+**The top-8 the model actually runs holds 15.7% of the router's probability
+mass** (per layer 9.4%–21.6%). On general text: 18.2%, and 132.4 experts for
+80% of the mass.
+
+Three things follow, and together they close the question:
+
+1. **Probability mass is not what governs which experts matter here.** A
+   model running 8 of 256 experts that carry a sixth of the mass works fine.
+   So a gating policy driven by a mass threshold is not a smaller version of
+   what the model does — it is a different, far more expensive thing: 80% of
+   the mass costs 141 experts, 17× the current budget.
+2. **Token-to-token variation is modest**: p50 → p99 is +14% at 80% mass and
+   +11% at 90%. Even granting a mass-threshold policy, the headroom between
+   the median token and the tail — the only thing adaptivity can recover over
+   a fixed K — is a small fraction of an already impossible budget.
+3. **Code is not a narrower workload than general text**, which is the
+   opposite of the intuition. It needs *more* experts for the same mass
+   (140.9 vs 132.4) and its top-8 holds *less* of it (15.7% vs 18.2%).
+
+This also explains R3's shape. With mass spread this thin, no expert is
+free to drop and none is catastrophic — KLD doubling per expert removed is
+what a flat router looks like from the outside.
+
+**Consequence:** the ggml-cuda work for token-adaptive K stays unbuilt. If
+adaptive routing is ever revisited it must be driven by measured *output
+contribution*, not by router probability — which is also what the per-expert
+precision result found, where REAP saliency beat selection frequency
+([per-expert precision](per-expert-precision.md)).

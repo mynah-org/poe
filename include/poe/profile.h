@@ -39,6 +39,12 @@ typedef struct {
      * routing (undecided, and expensive to build). */
     uint64_t *mass_k_hist[POE_PROFILE_NMASS];
 
+    /* Per layer, the mean probability mass the applied top-k actually holds.
+     * The mirror of mass_k: not "how many experts would carry 80% of the
+     * mass" but "how much mass do the experts we run carry". 0 for profiles
+     * written before it existed. */
+    double   *topk_mass;
+
     /* per layer × expert [n_layers * n_experts] */
     uint64_t *sel_count;
     double   *gate_mean;
