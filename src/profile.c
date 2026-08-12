@@ -18,7 +18,10 @@ void poe_profile_free(poe_profile *p) {
     if (p == NULL) return;
     free(p->layer_tokens);
     free(p->entropy_bits);
-    for (int i = 0; i < POE_PROFILE_NMASS; i++) free(p->mass_k[i]);
+    for (int i = 0; i < POE_PROFILE_NMASS; i++) {
+        free(p->mass_k[i]);
+        free(p->mass_k_hist[i]);
+    }
     free(p->sel_count);
     free(p->gate_mean);
     free(p->reap_mean);
@@ -104,6 +107,21 @@ int poe_profile_load(poe_profile **out, const char *path,
 
         p->layer_tokens[li] = poe_json_u64(poe_json_get(lj, "tokens"), 0);
         p->entropy_bits[li] = poe_json_num(poe_json_get(lj, "entropy_bits_mean"), 0.0);
+
+        const poe_json *mh = poe_json_get(lj, "mass_k_hist");
+        for (int i = 0; mh != NULL && i < POE_PROFILE_NMASS; i++) {
+            const poe_json *bins = poe_json_get(mh, MASS_KEYS[i]);
+            if (poe_json_len(bins) == 0) continue;
+            if (p->mass_k_hist[i] == NULL) {
+                p->mass_k_hist[i] = calloc((size_t)L * POE_PROFILE_KHIST,
+                                           sizeof *p->mass_k_hist[i]);
+                if (p->mass_k_hist[i] == NULL) continue;
+            }
+            for (size_t b = 0; b < poe_json_len(bins) &&
+                               b < POE_PROFILE_KHIST; b++)
+                p->mass_k_hist[i][(size_t)li * POE_PROFILE_KHIST + b] =
+                    poe_json_u64(poe_json_at(bins, b), 0);
+        }
 
         const poe_json *mk = poe_json_get(lj, "mass_k_mean");
         for (int i = 0; i < POE_PROFILE_NMASS; i++)

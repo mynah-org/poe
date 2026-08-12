@@ -44,6 +44,24 @@ int main(void) {
     CHECK(feq(a.mass_k_sum[3][0], 4.0 + 3.0), "mass-k .99 += 3");
     CHECK(a.tok_probs[0] == 2, "2 tokens observed for probs on layer 0");
 
+    /* The histogram behind those means: token 1 was uniform (min-k 4 at
+     * every threshold), token 2 concentrated (1, 2, 2, 3). A mean of 2.5
+     * describes neither, which is the whole reason the bins exist. */
+    CHECK(a.mass_k_hist[0][0 * POE_ACCUM_KHIST + 3] == 1 &&
+          a.mass_k_hist[0][0 * POE_ACCUM_KHIST + 0] == 1,
+          "mass-k .80 histogram has one token at k=4 and one at k=1");
+    CHECK(a.mass_k_hist[3][0 * POE_ACCUM_KHIST + 3] == 1 &&
+          a.mass_k_hist[3][0 * POE_ACCUM_KHIST + 2] == 1,
+          "mass-k .99 histogram has one token at k=4 and one at k=3");
+    {
+        uint64_t total = 0;
+        for (int b = 0; b < POE_ACCUM_KHIST; b++)
+            total += a.mass_k_hist[1][0 * POE_ACCUM_KHIST + b];
+        CHECK(total == a.tok_probs[0],
+              "every observed token lands in exactly one bin (%llu)",
+              (unsigned long long)total);
+    }
+
     /* ── logits path: softmax(logits) == conc must give identical stats ── */
     float logits[4];
     for (int e = 0; e < 4; e++) logits[e] = logf(conc[e]) + 7.5f;

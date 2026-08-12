@@ -1,4 +1,4 @@
-/* cmd_budget.c — `poe routing-budget model.gguf [--json]`
+/* cmd_budget.c — `poe routing-budget model.gguf [--profile p] [--json]`
  *
  * R0 of the adaptive-routing track: exact active-parameter accounting as a
  * function of the routed expert count K. This answers "can an A3B model
@@ -19,7 +19,79 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "poe/profile.h"
 #include "cli.h"
+
+/* How many experts a token actually needs, and — the part that decides
+ * whether token-adaptive routing is worth kernel work — how much that
+ * varies from token to token.
+ *
+ * A static per-layer schedule can only exploit variation *across layers*,
+ * and R7 measured that away. Adaptivity needs variation *across tokens*,
+ * which a mean cannot show: a tight distribution means every token wants
+ * the same budget and adaptivity has nothing to sell, a wide one means a
+ * fixed K is overspending on most tokens to serve a minority. */
+static void print_mass_k(const poe_profile *pr) {
+    static const double thr[POE_PROFILE_NMASS] = { 0.80, 0.90, 0.95, 0.99 };
+    int any = 0;
+    for (int i = 0; i < POE_PROFILE_NMASS; i++) any |= pr->mass_k_hist[i] != NULL;
+    if (!any) {
+        printf("\nExperts a token actually needs\n");
+        printf("  the profile predates the histogram; only means are available:\n");
+        for (int i = 0; i < POE_PROFILE_NMASS; i++) {
+            double sum = 0;
+            for (uint32_t l = 0; l < pr->n_layers; l++) sum += pr->mass_k[i][l];
+            printf("    %.0f%% mass   mean k %.2f\n", thr[i] * 100.0,
+                   pr->n_layers ? sum / pr->n_layers : 0.0);
+        }
+        return;
+    }
+
+    printf("\nExperts a token actually needs   (pooled over %u layers, %llu tokens)\n",
+           pr->n_layers, (unsigned long long)pr->tokens);
+    printf("  mass    mean    p50   p90   p99   max    share of tokens at or below the mean\n");
+    for (int i = 0; i < POE_PROFILE_NMASS; i++) {
+        if (pr->mass_k_hist[i] == NULL) continue;
+        uint64_t bins[POE_PROFILE_KHIST];
+        uint64_t total = 0;
+        for (int b = 0; b < POE_PROFILE_KHIST; b++) {
+            bins[b] = 0;
+            for (uint32_t l = 0; l < pr->n_layers; l++)
+                bins[b] += pr->mass_k_hist[i][(size_t)l * POE_PROFILE_KHIST + b];
+            total += bins[b];
+        }
+        if (total == 0) continue;
+
+        double mean = 0;
+        for (int b = 0; b < POE_PROFILE_KHIST; b++)
+            mean += (double)(b + 1) * (double)bins[b];
+        mean /= (double)total;
+
+        uint32_t q[3] = { 0, 0, 0 };
+        const double want[3] = { 0.50, 0.90, 0.99 };
+        uint64_t cum = 0;
+        int qi = 0;
+        uint32_t maxk = 1;
+        for (int b = 0; b < POE_PROFILE_KHIST; b++) {
+            if (bins[b]) maxk = (uint32_t)b + 1;
+            cum += bins[b];
+            while (qi < 3 && (double)cum / (double)total >= want[qi])
+                q[qi++] = (uint32_t)b + 1;
+        }
+        while (qi < 3) q[qi++] = maxk;
+
+        uint64_t at_or_below = 0;
+        for (int b = 0; b < POE_PROFILE_KHIST && (double)(b + 1) <= mean; b++)
+            at_or_below += bins[b];
+
+        printf("  %3.0f%%   %5.2f   %4u  %4u  %4u  %4u%s    %5.1f%%\n",
+               thr[i] * 100.0, mean, q[0], q[1], q[2], maxk,
+               maxk >= POE_PROFILE_KHIST ? "+" : " ",
+               100.0 * (double)at_or_below / (double)total);
+    }
+    printf("\n  A fixed K must be set for the tail, so the gap between p50 and p99\n"
+           "  is what token-adaptive routing could recover — and nothing else can.\n");
+}
 
 /* Σ_blocks min(K, E_b) · per-expert params. Per-block so that a model with
  * heterogeneous expert counts still adds up exactly. */
@@ -35,11 +107,13 @@ static uint64_t routed_params_at_k(const poe_model *m, uint32_t k) {
 }
 
 int poe_cmd_routing_budget(int argc, char **argv) {
-    const char *path = NULL;
+    const char *path = NULL, *profile_path = NULL;
     int json = 0;
 
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--json") == 0) json = 1;
+        else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc)
+            profile_path = argv[++i];
         else if (argv[i][0] == '-') {
             fprintf(stderr, "poe routing-budget: unknown option '%s'\n", argv[i]);
             return 2;
@@ -50,7 +124,11 @@ int poe_cmd_routing_budget(int argc, char **argv) {
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: poe routing-budget <model.gguf> [--json]\n");
+        fprintf(stderr, "usage: poe routing-budget <model.gguf> "
+                        "[--profile p.poeprofile] [--json]\n"
+                        "\n"
+                        "  --profile   also report how many experts a token\n"
+                        "              actually needs, and how much that varies\n");
         return 2;
     }
 
@@ -140,6 +218,20 @@ int poe_cmd_routing_budget(int argc, char **argv) {
     printf("\nminimum routing-only floor (K=1, with embeddings)   %s\n", p1);
     printf("note: compute floor only — resident RAM/VRAM is unchanged unless\n");
     printf("      experts are also pruned (poe plan/apply) or offloaded.\n");
+
+    if (profile_path != NULL) {
+        poe_profile *pr = NULL;
+        if (poe_profile_load(&pr, profile_path, err, sizeof err) != 0) {
+            fprintf(stderr, "poe routing-budget: %s\n", err);
+            poe_model_close(m);
+            return 1;
+        }
+        if (strcmp(pr->fingerprint, m->fingerprint) != 0)
+            printf("\nwarning: the profile was captured from a different "
+                   "checkpoint\n");
+        print_mass_k(pr);
+        poe_profile_free(pr);
+    }
 
     poe_model_close(m);
     return 0;

@@ -28,7 +28,9 @@ int poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,
              a->norm_sum && a->tok_probs && a->tok_sel && a->entropy_sum;
     for (int i = 0; i < POE_ACCUM_NMASS; i++) {
         a->mass_k_sum[i] = calloc(n_layers, sizeof *a->mass_k_sum[i]);
-        ok = ok && a->mass_k_sum[i];
+        a->mass_k_hist[i] = calloc((size_t)n_layers * POE_ACCUM_KHIST,
+                                   sizeof *a->mass_k_hist[i]);
+        ok = ok && a->mass_k_sum[i] && a->mass_k_hist[i];
     }
     if (!ok) { poe_accum_free(a); return -1; }
     return 0;
@@ -43,7 +45,10 @@ void poe_accum_free(poe_accum *a) {
     free(a->tok_probs);
     free(a->tok_sel);
     free(a->entropy_sum);
-    for (int i = 0; i < POE_ACCUM_NMASS; i++) free(a->mass_k_sum[i]);
+    for (int i = 0; i < POE_ACCUM_NMASS; i++) {
+        free(a->mass_k_sum[i]);
+        free(a->mass_k_hist[i]);
+    }
     memset(a, 0, sizeof *a);
 }
 
@@ -93,12 +98,18 @@ void poe_accum_observe_probs(poe_accum *a, uint32_t layer, uint32_t T,
             k = e + 1;
             while (ti < POE_ACCUM_NMASS && cum >= poe_accum_mass_thresholds[ti]) {
                 a->mass_k_sum[ti][layer] += (double)k;
+                a->mass_k_hist[ti][(size_t)layer * POE_ACCUM_KHIST +
+                                   (k <= POE_ACCUM_KHIST - 1 ? k - 1
+                                                             : POE_ACCUM_KHIST - 1)]++;
                 ti++;
             }
         }
         /* numerically short distributions: charge the full expert count */
-        for (; ti < POE_ACCUM_NMASS; ti++)
+        for (; ti < POE_ACCUM_NMASS; ti++) {
             a->mass_k_sum[ti][layer] += (double)E;
+            a->mass_k_hist[ti][(size_t)layer * POE_ACCUM_KHIST +
+                               POE_ACCUM_KHIST - 1]++;
+        }
 
         a->tok_probs[layer]++;
     }
@@ -185,6 +196,19 @@ void poe_accum_write_json(const poe_accum *a, FILE *f, const char *indent) {
             fprintf(f, "%s\"%.2f\": %.3f", i ? ", " : "",
                     poe_accum_mass_thresholds[i],
                     tp ? a->mass_k_sum[i][l] / (double)tp : 0.0);
+        fprintf(f, "},\n");
+
+        /* the distribution behind that mean, 1..32 experts plus "more" */
+        fprintf(f, "%s   \"mass_k_hist\": {", indent);
+        for (int i = 0; i < POE_ACCUM_NMASS; i++) {
+            fprintf(f, "%s\"%.2f\": [", i ? ", " : "",
+                    poe_accum_mass_thresholds[i]);
+            for (int b = 0; b < POE_ACCUM_KHIST; b++)
+                fprintf(f, "%s%llu", b ? "," : "",
+                        (unsigned long long)a->mass_k_hist[i][
+                            (size_t)l * POE_ACCUM_KHIST + b]);
+            fprintf(f, "]");
+        }
         fprintf(f, "},\n");
 
         fprintf(f, "%s   \"sel_count\": [", indent);

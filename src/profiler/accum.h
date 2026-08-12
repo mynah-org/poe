@@ -20,6 +20,16 @@
 #define POE_ACCUM_NMASS 4
 extern const double poe_accum_mass_thresholds[POE_ACCUM_NMASS]; /* .80 .90 .95 .99 */
 
+/* The mean min-k answers "how many experts does a token need on average".
+ * It cannot answer the question that decides whether *token-adaptive* K is
+ * worth kernel work: whether tokens differ from each other. A schedule can
+ * only exploit variation across layers; adaptivity needs variation across
+ * tokens, and a mean hides it completely. So the full distribution is kept
+ * as a histogram — 32 bins plus an overflow, because a token needing more
+ * than 32 of 256 experts is already past any budget worth running. */
+#define POE_ACCUM_KHIST 33
+
+
 typedef struct {
     uint32_t n_layers;
     uint32_t n_experts;
@@ -45,6 +55,7 @@ typedef struct {
     uint64_t *tok_sel;        /* tokens whose selection was observed           */
     double   *entropy_sum;    /* Σ over tokens of H(p) in bits                 */
     double   *mass_k_sum[POE_ACCUM_NMASS]; /* Σ of min-k reaching threshold    */
+    uint64_t *mass_k_hist[POE_ACCUM_NMASS];/* [layer][bin], bin 32 = "more"    */
 } poe_accum;
 
 int  poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,

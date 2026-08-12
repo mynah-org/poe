@@ -63,6 +63,7 @@ test: build/test_model build/test_accum build/test_compare build/test_plan \
 	./poe experts build/fixture-moe.gguf --json > /dev/null
 	./poe routing-budget build/fixture-moe.gguf
 	./poe routing-budget build/fixture-moe.gguf --json > /dev/null
+	./poe routing-budget build/fixture-moe.gguf --profile build/pa.poeprofile 2>&1 | tail -8
 	./poe compare build/pa.poeprofile build/pb.poeprofile
 	./poe compare build/pa.poeprofile build/pb.poeprofile --json > /dev/null
 	./poe plan build/plan-fix.gguf --profile build/plan.poeprofile --method reap --prune 25% -o build/smoke.poeplan

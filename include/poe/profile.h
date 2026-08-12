@@ -12,7 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define POE_PROFILE_NMASS 4   /* thresholds .80 .90 .95 .99, writer-fixed */
+#define POE_PROFILE_NMASS 4    /* thresholds .80 .90 .95 .99, writer-fixed  */
+#define POE_PROFILE_KHIST 33   /* min-k bins: 1..32 experts, then "more"    */
 
 typedef struct {
     uint32_t version;                 /* "poeprofile" format version       */
@@ -27,6 +28,16 @@ typedef struct {
     uint64_t *layer_tokens;
     double   *entropy_bits;
     double   *mass_k[POE_PROFILE_NMASS];
+
+    /* The distribution behind that mean: [layer][bin], bin b counting
+     * tokens that needed b+1 experts, the last bin counting "more than
+     * POE_PROFILE_KHIST-1". NULL for profiles written before it existed.
+     *
+     * The mean says how many experts a token needs on average; only the
+     * spread says whether tokens differ from each other, which is the
+     * difference between a static schedule (dead, see R7) and token-adaptive
+     * routing (undecided, and expensive to build). */
+    uint64_t *mass_k_hist[POE_PROFILE_NMASS];
 
     /* per layer × expert [n_layers * n_experts] */
     uint64_t *sel_count;

@@ -40,6 +40,8 @@ static const char *PROFILE_FMT =
 "    {\"layer\": 0, \"tokens\": 16,\n"
 "     \"entropy_bits_mean\": 1.500000,\n"
 "     \"mass_k_mean\": {\"0.80\": 2.0, \"0.90\": 3.0, \"0.95\": 3.5, \"0.99\": 4.0},\n"
+"     \"mass_k_hist\": {\"0.80\": [8,8,0,0], \"0.90\": [0,16,0,0],\n"
+"                       \"0.95\": [0,8,8,0], \"0.99\": [0,0,0,16]},\n"
 "     \"sel_count\": [10,0,5,1],\n"
 "     \"gate_mean\": [0.200000,0.000000,0.150000,0.050000]},\n"
 "    {\"layer\": 1, \"tokens\": 16,\n"
@@ -108,6 +110,14 @@ int main(void) {
     CHECK(feq(a->gate_mean[2], 0.15), "gate mean parsed");
     CHECK(feq(a->entropy_bits[0], 1.5) && feq(a->mass_k[1][0], 3.0),
           "entropy and mass-k parsed");
+    CHECK(a->mass_k_hist[0] != NULL &&
+          a->mass_k_hist[0][0 * POE_PROFILE_KHIST + 0] == 8 &&
+          a->mass_k_hist[0][0 * POE_PROFILE_KHIST + 1] == 8,
+          "the mass-k histogram parses, bins in order");
+    CHECK(a->mass_k_hist[3][0 * POE_PROFILE_KHIST + 3] == 16,
+          "the .99 threshold keeps its own bins");
+    CHECK(a->mass_k_hist[0][1 * POE_PROFILE_KHIST + 0] == 0,
+          "a layer with no histogram stays zero rather than borrowing one");
 
     /* ── comparison metrics, hand-computed ──────────────────────────────── */
     printf("compare\n");
