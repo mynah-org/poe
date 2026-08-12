@@ -32,6 +32,7 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe forge` | ✅ the whole pipeline in one command: (profile via `poe-profile` →) plan → exact estimate → apply → verify, intermediate artifacts preserved next to the output |
 | `tools/coding_eval.py` | ✅ pruned-vs-full behavioral eval: 10 coding tasks (easy→hard) generated at temp 0 through llama-server, compiled/executed against hidden test cases; win/fail per task + prompt/generation t/s |
 | `poe quantplan` | ✅ per-slab mixed precision: spend a byte budget across the routed expert slabs (Q2_K..Q6_K ladder, greedy by measured error per byte), exact accounting, emits llama-quantize's `--tensor-type-file`; ranks layers by REAP saliency (`--profile`) or by an imatrix statistic (`--imatrix`), and reports how far the ranking is from being a plain depth ramp |
+| `poe requant` | ✅ per-expert precision emulated inside one carrier type: cold experts pushed through a hard quantizer and back, the slab stored at the carrier, so two arms at the same average bits are byte-identical in size — the M9b question measured without a runtime patch ([why](docs/mixed-precision.md)) |
 | `poe validate` | ✅ structural checks (shapes vs metadata, slab divisibility, quant geometry); with `--plan`, source/pruned provenance and exact byte accounting |
 
 Recipe + field notes: [docs/reap-coding-recipe.md](docs/reap-coding-recipe.md).

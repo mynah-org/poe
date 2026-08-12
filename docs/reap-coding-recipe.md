@@ -115,6 +115,21 @@ out, at 50% it ignored the tie-breaking rule). 25% is the free lunch;
 beyond that you are trading hard-tier reliability for gigabytes, and
 the eval quantifies that trade per checkpoint.
 
+### Verify off-domain too, or the verification is worthless
+
+The table above is measured on the domain the model was calibrated for,
+and that is the one measurement that structurally cannot see what pruning
+costs. Head to head at equal bytes on Qwen3.6
+([docs/quant-vs-prune.md](quant-vs-prune.md)): a REAP-23.8% checkpoint at
+Q4_K scores KLD **0.0327 on code** against a full-expert Q3_K's 0.0343 —
+better — and **0.483 on wikitext** against 0.067. Same file size, 7.2×
+the divergence, top-1 agreement down from 89% to 74%.
+
+So the rule is: at a fixed byte budget spend on precision first, prune
+shallow if at all, and always run one off-domain check. A pruned model is
+not a smaller model, it is a narrower one, and the narrowing is invisible
+from inside the domain.
+
 ## The second axis: reducing active top-k
 
 Expert *pruning* shrinks the checkpoint; reducing the *active* expert
