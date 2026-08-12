@@ -23,7 +23,7 @@ Early development. Currently implemented (milestone 1 of the roadmap in
 | `poe inspect` | ✅ static MoE structure, storage accounting, theoretical reductions |
 | `poe experts` | ✅ expert tensor mapping and sizes |
 | `poe routing-budget` | ✅ exact active-parameter accounting per routed-K |
-| `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K; `--metric reap` adds streaming REAP saliency (gate × expert-output norm); `--metric imatrix` adds per-expert activation statistics, written as llama.cpp's GGUF imatrix; `--until-stable` stops calibration when the prune decision converges |
+| `poe-profile` (standalone) | ✅ router observer over llama.cpp: routing + gate statistics, entropy, cumulative-mass-K; `--metric reap` adds streaming REAP saliency (gate × expert-output norm); `--metric imatrix` adds per-expert activation statistics, written as llama.cpp's GGUF imatrix (`--imatrix-all` covers the dense path too: 511 entries on Qwen3.6, against the 510 the checkpoint's own metadata records); `--until-stable` stops calibration when the prune decision converges |
 | `poe compare` | ✅ expert-fingerprint overlap between workload profiles: Jaccard / weighted Jaccard / Spearman / JS divergence, exclusive and cold experts, REAP prune-set agreement |
 | `poe plan` | ✅ deterministic expert-removal plans from weighted profiles (`reap` / `frequency` / `gate`), exact byte accounting, conservative guards ([format](docs/poeplan.md)) |
 | `poe estimate` | ✅ plan accounting + fingerprint/byte verification against the source model |
@@ -43,6 +43,9 @@ Mixed precision per expert slab, and why uniform allocation won:
 Quantization versus expert deletion at equal bytes — a coin flip in the
 calibration domain, 7× worse outside it:
 [docs/quant-vs-prune.md](docs/quant-vs-prune.md).
+Per-expert precision, measured before building the runtime for it — aiming
+the damage at cold experts wins 2.4× in the calibration domain:
+[docs/per-expert-precision.md](docs/per-expert-precision.md).
 
 ## Build
 

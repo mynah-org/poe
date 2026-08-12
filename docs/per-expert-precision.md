@@ -89,4 +89,66 @@ Two signals, and they are not the same ordering:
 - `--rank counts` — how often the workload routes there at all. This is the
   M9 thesis stated literally, and it is the arm the thesis actually claims.
 
-Both get an inverted control.
+Both get an inverted control. On Qwen3.6 the two orderings agree on about
+half of what they pick — `poe diff` on the two plans at the same prune
+fraction reports **Jaccard 0.496**, with 1962 of 5800 expert slots chosen
+by one and not the other — so the second arm is a genuinely different test
+rather than a rerun of the first.
+
+## Result: aiming works, and it works as specialization
+
+Qwen3.6-35B-A3B, from the Q8_0 source, coding calibration (8192 tokens).
+All six arms are **20,797,013,312 bytes** — the same file size, not a
+matched one — and all emulate 3.4380 bits per weight against uniform Q3_K's
+3.4375. KLD against the Q8_0 source, 100 chunks × 512, on held-out C/C++
+and on wikitext-2.
+
+| Arm | KLD code | top-1 code | KLD general | top-1 general |
+|---|---|---|---|---|
+| *(ceiling)* Q4_K, 4.5 bits | 0.008998 ±0.00025 | 97.31% | 0.017164 ±0.00028 | 94.31% |
+| uniform, all Q3_K | 0.031487 ±0.00059 | 95.35% | **0.064341** ±0.00099 | **89.33%** |
+| **aimed by REAP, 145 coldest at Q2_K** | **0.013328** ±0.00042 | **96.91%** | 0.092707 ±0.00148 | 87.49% |
+| inverted *(control)* | 0.067434 ±0.00100 | 92.74% | 0.085017 ±0.00110 | 87.27% |
+| aimed by frequency | 0.016521 ±0.00037 | 96.34% | 0.084363 ±0.00116 | 87.57% |
+| inverted by frequency *(control)* | 0.063965 ±0.00104 | 93.05% | 0.093685 ±0.00137 | 87.43% |
+
+**In the calibration domain, aiming wins by 2.4×.** Same bytes, same
+average bits: 0.0133 against uniform's 0.0315. The gap is far larger than
+the emulation's asymmetric tax (+7.3% for uniform, +2.1% for aimed), and
+the clean comparison confirms it — the inverted control, which pays exactly
+the same tax as the arm under test, is **5× worse** (0.0674). Unlike M9a's
+per-layer ranking, this signal has a direction, and a strong one.
+
+Put differently: at 3.438 bits the aimed allocation recovers most of the
+way to a full Q4_K checkpoint (0.0133 against 0.0090) while spending 76% of
+its expert bytes.
+
+**Contribution beats frequency, and that is not what the thesis said.**
+The thesis is usually stated as "the experts a workload never routes to",
+which is selection frequency — but ranking by frequency scores 0.0165
+against REAP saliency's 0.0133, about 6σ apart, even though both crush the
+same number of experts and both beat uniform by a wide margin (1.9× and
+2.4×). How much an expert *contributes when it is used* predicts
+quantization sensitivity better than how often it is used at all. Both
+rankings carry direction: each is ~4× better than its own inverted control.
+
+**Outside the calibration domain it reverses.** On wikitext the aimed arm
+(0.0927) is worse than uniform (0.0643) and **ties its own inverted
+control** (0.0850, marginally better); the frequency arm behaves the same
+way (0.0844 against its control's 0.0937). That is exactly what should
+happen: the cold experts are cold *for code*. A general workload routes to
+them, and finds them crushed. The ranking that has a 5× direction in the
+calibration domain has none outside it.
+
+**This is the same shape as [quantization versus deletion](quant-vs-prune.md).**
+Both knobs buy a lot on the domain they were calibrated for and charge for
+it everywhere else. The difference is the exchange rate: per-expert
+precision at 3.438 bits gives 58% less in-domain damage than uniform for a
+1.44× off-domain penalty, where deletion at matched bytes gave *no*
+in-domain gain for a 7.2× penalty.
+
+**Consequence for M9b.** The runtime work — splitting each slab into a hot
+and a cold tensor, two `mul_mat_id` passes with a router-id remap, a merge
+on the hot path — now has a measured payoff to justify it, which it did not
+have this morning. It should be built for the single-domain case POE exists
+to serve, and it must never be shipped as a general-purpose quant.
