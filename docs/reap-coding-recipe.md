@@ -286,3 +286,12 @@ held on the second architecture, biases included.
 - **Keep artifacts.** `.poeprofile` and `.poeplan` are tiny, diffable and
   carry fingerprints; with them, any pruned GGUF can be audited
   (`poe validate --plan`) or reproduced byte-identically later.
+
+## Appendix — the off-domain damage is capability loss, not miscalibration
+
+Pruning leaves the router exactly calibrated: the surviving rows are copied
+byte for byte, and the runtime's renormalized top-k makes the post-prune
+routing the exact conditional of the original router over the surviving set.
+So the collapse in off-domain agreement is the model routing correctly to a
+set that no longer contains what it wanted. Derivation in
+[router-calibration.md](router-calibration.md).
