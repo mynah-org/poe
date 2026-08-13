@@ -1,3 +1,156 @@
+diff --git a/ggml/src/ggml-cuda/mmid.cu b/ggml/src/ggml-cuda/mmid.cu
+index f80442f..a4f702b 100644
+--- a/ggml/src/ggml-cuda/mmid.cu
++++ b/ggml/src/ggml-cuda/mmid.cu
+@@ -39,23 +39,34 @@ static __global__ void mm_ids_helper(
+     int it_compact = 0; // Running index for the compact slice of this expert.
+ 
+     if constexpr (n_expert_used_template == 0) {
+-        // Generic implementation:
++        // Generic implementation. One compact row per *use* of the expert, not
++        // per token: a token is allowed to name the same expert in more than
++        // one of its slots, and each of those slots needs its own row.
+         for (int it = 0; it < n_tokens; ++it) {
+-            int iex_used = -1; // The index at which the expert is used, if any.
+-            for (int iex = threadIdx.x; iex < n_expert_used; iex += warp_size) {
+-                const int expert_used = ids[it*si1 + iex];
++            for (int iex0 = 0; iex0 < n_expert_used; iex0 += warp_size) {
++                const int iex = iex0 + threadIdx.x;
++                const int expert_used = iex < n_expert_used ? ids[it*si1 + iex] : INT_MAX;
+                 nex_prev += expert_used < expert;
+-                if (expert_used == expert) {
+-                    iex_used = iex;
++
++                const int self = expert_used == expert;
++
++                // Inclusive prefix sum over the warp, so every matching slot
++                // gets a distinct row index in the order the slots appear:
++                int pref = self;
++#pragma unroll
++                for (int offset = 1; offset < warp_size; offset <<= 1) {
++                    const int tmp = __shfl_up_sync(0xFFFFFFFF, pref, offset, warp_size);
++                    if (static_cast<int>(threadIdx.x) >= offset) {
++                        pref += tmp;
++                    }
+                 }
+-            }
++                const int n_used_here = __shfl_sync(0xFFFFFFFF, pref, warp_size - 1, warp_size);
+ 
+-            if (iex_used != -1) {
+-                store[it_compact] = mm_ids_helper_store(it, iex_used);
+-            }
++                if (self) {
++                    store[it_compact + pref - 1] = mm_ids_helper_store(it, iex);
++                }
+ 
+-            if (warp_reduce_any<warp_size>(iex_used != -1)) {
+-                it_compact++;
++                it_compact += n_used_here;
+             }
+         }
+     } else {
+@@ -71,8 +82,24 @@ static __global__ void mm_ids_helper(
+             const int iex_used = expert_used == expert ? iex : -1;
+             nex_prev += expert_used < expert;
+ 
+-            // Whether the threads at this token position have used the expert:
+-            const int it_compact_add_self = warp_reduce_any<neu_padded>(iex_used != -1);
++            // How many of this token's slots used the expert, and where this
++            // slot sits among them. A token may name the same expert twice --
++            // counting tokens instead of uses would leave the second slot with
++            // no compact row, hence an unwritten entry in the inverse map.
++            // Note warp_reduce_sum<width> cannot be used here: on Ampere and
++            // later it calls __reduce_add_sync over the whole warp and ignores
++            // the width, which would mix neighbouring tokens together.
++            int pref = iex_used != -1;
++#pragma unroll
++            for (int offset = 1; offset < neu_padded; offset <<= 1) {
++                const int tmp = __shfl_up_sync(0xFFFFFFFF, pref, offset, warp_size);
++                if (iex >= offset) {
++                    pref += tmp;
++                }
++            }
++            const int iex_compact = pref - (iex_used != -1); // rows of this token before this slot
++            const int it_compact_add_self = __shfl_sync(0xFFFFFFFF, pref,
++                (threadIdx.x / neu_padded)*neu_padded + neu_padded - 1, warp_size);
+ 
+             // Do a scan over threads at lower token positions in warp to get the correct index for writing data:
+             int it_compact_add_lower = 0;
+@@ -85,7 +112,7 @@ static __global__ void mm_ids_helper(
+             }
+ 
+             if (iex_used != -1) {
+-                store[it_compact + it_compact_add_lower] = mm_ids_helper_store(it, iex_used);
++                store[it_compact + it_compact_add_lower + iex_compact] = mm_ids_helper_store(it, iex_used);
+             }
+ 
+             // The thread with the highest index in the warp always has the sum over the whole warp, use it to increment all threads:
+@@ -134,7 +161,9 @@ static void launch_mm_ids_helper(
+ 
+     const dim3 num_blocks(n_experts, 1, 1);
+     const dim3 block_size(warp_size, 1, 1);
+-    const size_t nbytes_shared = n_tokens*sizeof(mm_ids_helper_store);
++    // One entry per *use*: with repeated ids a single token can contribute up
++    // to n_expert_used rows to the same expert.
++    const size_t nbytes_shared = (size_t) n_tokens*n_expert_used_var*sizeof(mm_ids_helper_store);
+     GGML_ASSERT(nbytes_shared <= smpbo);
+     mm_ids_helper<n_expert_used_template><<<num_blocks, block_size, nbytes_shared, stream>>>
+         (ids, ids_src1, ids_dst, expert_bounds, n_tokens, n_expert_used_var, nchannels_y, si1, sis1, write_inverse);
+diff --git a/ggml/src/ggml-cuda/mmq.cu b/ggml/src/ggml-cuda/mmq.cu
+index 707437e..1fa6150 100644
+--- a/ggml/src/ggml-cuda/mmq.cu
++++ b/ggml/src/ggml-cuda/mmq.cu
+@@ -1,5 +1,7 @@
+ #include "common.cuh"
+ #include "mmq.cuh"
++
++#include <vector>
+ #include "quantize.cuh"
+ #include "mmid.cuh"
+ 
+@@ -197,6 +199,42 @@ void ggml_cuda_mul_mat_q(
+         const int si1  = ids->nb[1] / ggml_element_size(ids);
+         const int sis1 = nb12 / nb11;
+ 
++        static const bool poe_ids_probe = getenv("POE_IDS_PROBE") != nullptr;
++        if (poe_ids_probe) {
++            const size_t n = (size_t) ne12 * si1;
++            std::vector<int32_t> host(n);
++            CUDA_CHECK(cudaMemcpyAsync(host.data(), ids->data, n * sizeof(int32_t),
++                                       cudaMemcpyDeviceToHost, stream));
++            CUDA_CHECK(cudaStreamSynchronize(stream));
++            int32_t lo = host[0], hi = host[0];
++            size_t oob = 0, tok_dup = 0, dup_slots = 0;
++            int max_mult = 1;
++            for (int64_t t = 0; t < ne12; ++t) {
++                int mult_here = 1;
++                bool dup_here = false;
++                for (int64_t k = 0; k < n_expert_used; ++k) {
++                    const int32_t v = host[t*si1 + k];
++                    lo = v < lo ? v : lo;
++                    hi = v > hi ? v : hi;
++                    if (v < 0 || v >= ne02) ++oob;
++                    int mult = 0;
++                    for (int64_t j = 0; j < n_expert_used; ++j) {
++                        if (host[t*si1 + j] == v) ++mult;
++                    }
++                    if (mult > 1) { dup_here = true; ++dup_slots; }
++                    mult_here = mult > mult_here ? mult : mult_here;
++                }
++                if (dup_here) ++tok_dup;
++                max_mult = mult_here > max_mult ? mult_here : max_mult;
++            }
++            fprintf(stderr, "POE ids probe: ne02=%lld n_used=%lld ne12=%lld si1=%d "
++                            "min=%d max=%d out_of_range=%zu  dup_tokens=%zu/%lld "
++                            "dup_slots=%zu max_mult=%d  first=[%d %d %d %d]\n",
++                    (long long) ne02, (long long) n_expert_used, (long long) ne12,
++                    si1, lo, hi, oob, tok_dup, (long long) ne12, dup_slots, max_mult,
++                    host[0], host[1], host[2], host[3]);
++        }
++
+         ggml_cuda_launch_mm_ids_helper((const int32_t *) ids->data, ids_src1.get(), ids_dst.get(), expert_bounds.get(),
+             ne02, ne12, n_expert_used, ne11, si1, sis1, /*write_inverse =*/ dedup_bcast, stream);
+         CUDA_CHECK(cudaGetLastError());
 diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
 index 836cfad..3ab9433 100644
 --- a/src/llama-arch.cpp
@@ -37,7 +190,7 @@ index 49c2a6a..7dd2828 100644
      LLM_TENSOR_FFN_GATE_UP_EXPS,
      LLM_TENSOR_FFN_DOWN_SHEXP,
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 2be3b75..32e6bf0 100644
+index 2be3b75..668964f 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -1867,6 +1867,53 @@ ggml_tensor * llm_graph_context::build_ffn(
@@ -133,7 +286,7 @@ index 2be3b75..32e6bf0 100644
      const int64_t n_embd   = cur->ne[0];
      const int64_t n_tokens = cur->ne[1];
      const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
-@@ -2075,7 +2134,107 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2075,7 +2134,113 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      //call early so that topk-moe can be used
      ggml_build_forward_expand(gf, weights);
  
@@ -218,7 +371,13 @@ index 2be3b75..32e6bf0 100644
 +        const int64_t n_hot = down_exps->ne[2];
 +        ggml_tensor * poe_f = ggml_cast(ctx0, ggml_cont(ctx0, selected_experts),
 +                                        GGML_TYPE_F32);
-+        if (getenv("POE_ZERO_IDS")) {
++        if (getenv("POE_SEQ_IDS")) {
++            // distinct ids by construction: slot j -> expert j. Same shape,
++            // same stride, same range as POE_ZERO_IDS -- the only difference
++            // is that no two slots of a token name the same expert.
++            ggml_tensor * ar = ggml_arange(ctx0, 0.0f, (float) n_expert_used, 1.0f);
++            poe_f = ggml_repeat(ctx0, ggml_reshape_2d(ctx0, ar, n_expert_used, 1), poe_f);
++        } else if (getenv("POE_ZERO_IDS")) {
 +            poe_f = ggml_scale(ctx0, poe_f, 0.0f);   // every slot -> expert 0
 +        } else {
 +            poe_f = ggml_clamp(ctx0, poe_f, 0.0f, (float) (n_hot - 1));
@@ -242,7 +401,7 @@ index 2be3b75..32e6bf0 100644
  
      if (weight_before_ffn) {
          // repeat cur to [n_embd, n_expert_used, n_tokens]
-@@ -2086,6 +2245,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2086,6 +2251,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
  
      ggml_tensor * up = nullptr;
      ggml_tensor * experts = nullptr;
@@ -260,7 +419,7 @@ index 2be3b75..32e6bf0 100644
  
      if (gate_up_exps) {
          // merged gate_up path: one mul_mat_id, then split into gate and up views
-@@ -2222,6 +2392,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2222,6 +2398,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(experts, "ffn_moe_down_biased", il);
      }
  
@@ -282,7 +441,7 @@ index 2be3b75..32e6bf0 100644
      if (!weight_before_ffn) {
          experts = ggml_mul(ctx0, experts, weights);
          cb(experts, "ffn_moe_weighted", il);
-@@ -2233,8 +2418,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2233,8 +2424,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
  
      assert(n_expert_used > 0);
  
@@ -299,7 +458,7 @@ index 2be3b75..32e6bf0 100644
          cur_experts[i] = ggml_view_2d(ctx0, experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1]);
  
          ggml_build_forward_expand(gf, cur_experts[i]);
-@@ -2246,13 +2438,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2246,13 +2444,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      //       ref: https://github.com/ggml-org/llama.cpp/pull/14753
      ggml_tensor * moe_out = cur_experts[0];
  

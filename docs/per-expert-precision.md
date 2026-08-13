@@ -224,6 +224,10 @@ on the GPU. KLD against the same Q8_0 source, on the same held-out C/C++,
 | split, 111 hot Q4_K + 145 cold Q2_K | 3.4380 | **0.013304** ±0.00104 | 97.16% |
 | split, 128 hot + 128 cold | 3.5625 | 0.012701 ±0.00090 | 97.32% |
 
+Re-measured afterwards at the full 100 chunks, on the fixed full-batch path:
+**0.013460 ±0.00052** and **0.012268 ±0.00032** — the same allocation ranking,
+the same values, with half the error bar.
+
 The emulation predicted **0.013328** for exactly that first allocation. The
 artifact measures **0.013304** — a 0.2% difference, far inside the error
 bars. Everything the gate assumed is therefore confirmed by the thing it was
@@ -237,16 +241,42 @@ file that runs.
 
 ### What it costs to run
 
-| | size | tg128 |
-|---|---|---|
-| split, 128/128 | **15.84 GiB** | **57.06 ± 0.21 t/s** |
-| the same model unsplit | 19.29 GiB | 66.51 ± 0.42 t/s |
+| | size | pp512 | tg128 |
+|---|---|---|---|
+| split, 128/128 | **15.84 GiB** | **1588.36 ± 5.91 t/s** | **58.90 ± 0.25 t/s** |
+| the same model unsplit | 19.29 GiB | 2261.96 ± 38.78 t/s | 67.65 ± 0.29 t/s |
 
-3.45 GiB smaller for 14.2% slower generation, against the 13.1% predicted
-by proxy before any of it was built.
+3.45 GiB smaller for **12.9% slower generation and 29.8% slower prefill**.
+The generation cost lands where the proxy put it before any of it was built
+(13.1%, from doubling the expert budget). Prefill pays about twice as much,
+which is what a compute-bound phase should do when the expert matmul work is
+doubled — the proxy only ever spoke for generation.
 
-**One rough edge remains.** Prefill at a large micro-batch reaches MMQ's
-with-ids kernels and takes an illegal memory access; `-b 8 -ub 8` keeps
-`mul_mat_id` on `mul_mat_vec_q` and everything runs, and generation never
-reaches MMQ at all. The eliminations and the next step are in
-[tools/patches/README.md](../tools/patches/README.md).
+### The prefill crash, and what it really was
+
+Prefill at a large micro-batch used to die inside MMQ's with-ids kernels with
+an illegal memory access, and only `-b 8 -ub 8` — 244.69 ± 0.56 t/s, a sixth
+of the speed — could get through. The cause was not the split's partial
+expert count, nor the ids' stride, nor any out-of-range id, all of which were
+eliminated one build at a time.
+
+It was an invariant nobody writes down because stock llama.cpp cannot break
+it: **the top-k ids of a token are distinct experts**. The split has to give
+every slot an id in *both* halves, so slots belonging to the other half get a
+stand-in — and stand-ins collide. On this checkpoint, 410 of 512 tokens carry
+a repeated id. `mm_ids_helper` compacts per token, so the second slot of a
+collision never gets a compact row and never gets its entry in the inverse
+map, which is then read uninitialized as a row index.
+
+The fix compacts per *use* instead of per token, and is included in the
+patch. It leaves stock models bit-identical, costs nothing measurable on them
+(pp512 within 0.8σ), and a paired run — same reference, same chunks, only the
+kernel path differing — puts the two paths 0.19σ apart on KLD. Full
+diagnosis in [tools/patches/README.md](../tools/patches/README.md).
+
+**A note on measurement discipline that this episode earned.** The first
+comparison of the fixed path was against a KLD measured on another day, and
+it showed a 3σ drop in top-1 agreement that simply is not there. Re-running
+both arms against the same reference file, in the same session, closed the
+gap to 0.36σ. When the effect being measured is smaller than the difference
+between two sessions, only paired runs mean anything.
