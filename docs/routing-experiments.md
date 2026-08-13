@@ -166,3 +166,64 @@ adaptive routing is ever revisited it must be driven by measured *output
 contribution*, not by router probability — which is also what the per-expert
 precision result found, where REAP saliency beat selection frequency
 ([per-expert precision](per-expert-precision.md)).
+
+## R-sim — the same question asked of output contribution: also dead
+
+R9 killed adaptivity driven by probability mass, and closed with the right
+objection to its own result: mass is not the quantity that governs which
+experts matter — the top-8 holds a sixth of it and the model is fine — so the
+policy should be driven by **measured output contribution** instead. M9b had
+independently found the same direction, REAP saliency beating selection
+frequency by ~6σ at identical bytes.
+
+So the profiler now asks the min-k question of that quantity. For every token
+and layer it ranks the applied slots by `gate × ‖expert output‖₂` — the value
+each expert actually adds — and records how few of them carry a given share
+of the total. Bounded by top-k rather than by the expert count, which is what
+makes an entry in this table a statement about K.
+
+Qwen3.6-35B-A3B Q8_0, 8192 tokens, 40 layers pooled:
+
+| share of contribution | mean k | p50 | p90 | p99 | tokens needing all 8 |
+|---|---|---|---|---|---|
+| 80% | 4.96 | 5 | 6 | 7 | 0.0% |
+| 90% | 6.38 | 7 | 7 | 8 | 1.0% |
+| 95% | 7.34 | 7 | 8 | 8 | 41.0% |
+| 99% | **8.00** | 8 | 8 | 8 | **99.8%** |
+
+General text (wikitext) gives 5.19 / 6.57 / 7.47 / 8.00 — the same shape.
+
+**The experts a token runs are not redundant.** It takes about five of eight
+to hold 80% of what they contribute, six and a half for 90%, and essentially
+all eight for 99%: 99.8% of tokens need every slot to reach that. There is no
+idle majority to skip.
+
+**And there is nothing for *adaptivity* to exploit.** The whole case for
+per-token K is that tokens differ from each other; here p50 → p99 moves 5 → 7
+at the 80% line and 7 → 8 at the 90% line. A policy must be set for the tail,
+and the tail is one or two experts away from the median. That is the same
+verdict R9 reached on mass, now reached on the quantity R9 said should
+replace it.
+
+**It also explains the K cliff measured independently.** On the 2025 baseline
+K=6 was free on the coding eval and K=4 broke it (10/10 → 6/10). K=6 sits
+just under the 90% contribution line; K=4 sits below even the 80% one, so a
+typical token loses more than a fifth of what its experts contribute. Two
+measurements taken a year and a model apart, agreeing.
+
+One detail worth keeping, because it is the clearest evidence that mass was
+the wrong instrument: by **mass**, code needs *more* experts than general text
+for the same share (140.9 vs 132.4 at 80%); by **contribution**, it needs
+slightly *fewer* (4.96 vs 5.19). The two quantities do not even order the two
+domains the same way.
+
+### What this closes
+
+The R-track's remaining entries — offline policy simulation (R-sim) and the
+PyTorch policy bench meant to justify ggml kernel work (R-proto) — are
+answered without building either. There is no policy over the applied experts
+that saves compute at unchanged quality, because the applied experts all
+contribute. Axis B is closed at "a global static K of 6 is free, 4 is not",
+and the remaining routing wins, if any, are in choosing *which* experts exist
+(axis A) rather than how many run.
+

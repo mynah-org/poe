@@ -39,6 +39,17 @@ typedef struct {
      * routing (undecided, and expensive to build). */
     uint64_t *mass_k_hist[POE_PROFILE_NMASS];
 
+    /* How few of the experts a token actually runs carry most of what they
+     * contribute: per layer the mean min-k over `gate x ||expert output||`
+     * within the applied top-k, and its distribution [layer][k-1].
+     *
+     * This is the min-k question asked of the quantity that governs the
+     * output rather than of probability mass, which R9 showed governs
+     * nothing here. Bounded by top_k, so a number in this table is directly
+     * a statement about K. NULL when the profile carries no REAP data. */
+    double   *contrib_k[POE_PROFILE_NMASS];
+    uint64_t *contrib_k_hist[POE_PROFILE_NMASS];
+
     /* Per layer, the mean probability mass the applied top-k actually holds.
      * The mirror of mass_k: not "how many experts would carry 80% of the
      * mass" but "how much mass do the experts we run carry". 0 for profiles

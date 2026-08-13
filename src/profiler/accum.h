@@ -61,6 +61,21 @@ typedef struct {
     double   *mass_k_sum[POE_ACCUM_NMASS]; /* Σ of min-k reaching threshold    */
     uint64_t *mass_k_hist[POE_ACCUM_NMASS];/* [layer][bin], see khist_bin      */
     double   *topk_mass_sum;  /* Σ of the probability the applied top-k holds  */
+
+    /* How much of what the applied experts actually *contribute* comes from
+     * how few of them. Router mass turned out not to be the quantity that
+     * governs which experts matter (R9: the top-8 holds 15.7% of it and the
+     * model is fine), and the direction M9b found is that contribution beats
+     * frequency. So this is the same min-k question asked of the quantity
+     * that decides: per token, sort the applied slots by gate x ||output||
+     * and count how many are needed to reach the threshold.
+     *
+     * Bounded by top_k rather than by the expert count, which is what makes
+     * it actionable: "3 of the 8 we run carry 90%" is a statement about K.
+     * Indexed [layer * top_k + (k-1)]; fed only under --metric reap. */
+    double   *contrib_k_sum[POE_ACCUM_NMASS];  /* Σ of min-k, per layer      */
+    uint64_t *contrib_k_hist[POE_ACCUM_NMASS]; /* [layer][k-1]               */
+    uint64_t *contrib_tok;    /* tokens with a usable contribution total     */
 } poe_accum;
 
 /* Which histogram bin a min-k of `k` out of `n_experts` lands in. Exposed

@@ -103,6 +103,44 @@ int main(void) {
     CHECK(feq(a.norm_sum[4 + 0], 6.0), "activation-norm sum expert0 = 6");
     CHECK(bad == 2, "reap left bad_ids untouched");
 
+    /* ── contribution concentration inside the applied top-k ───────────── */
+    {
+        /* The quantity that decides whether K can fall is not probability
+         * mass (R9) but how concentrated the contribution of the experts we
+         * already run is. Two tokens, hand-computed, with the slots given
+         * out of order so the ranking is exercised rather than assumed. */
+        poe_accum c;
+        poe_accum_init(&c, 1, 8, 4);
+        const int32_t cid[8] = { 0, 1, 2, 3,   4, 5, 6, 7 };
+        const float   cwt[8] = { 1, 1, 1, 1,   1, 1, 1, 1 };
+        /* token A contributions {0.5, 17, 0.4, 2.1}: total 20, one dominant;
+         * token B uniform, where nothing is spare. The values keep every
+         * threshold clear of an exact tie: a cumulative rule compares sums
+         * of floats against a fraction of their total, and a test that sits
+         * on the boundary measures rounding rather than behaviour. */
+        const float   cnm[8] = { 0.5f, 17.0f, 0.4f, 2.1f,   1, 1, 1, 1 };
+        uint64_t cbad = 0;
+        poe_accum_observe_reap(&c, 0, 2, cid, cwt, cnm, &cbad);
+
+        CHECK(c.contrib_tok[0] == 2, "both tokens ranked (%llu)",
+              (unsigned long long)c.contrib_tok[0]);
+        /* A: 80% (16) reached by the 17 alone; 90% (18) and 95% (19) need
+         *    the 2.1 as well; 99% (19.8) needs all four.
+         * B: every threshold needs all four. */
+        CHECK(feq(c.contrib_k_sum[0][0] / 2.0, 2.5), "mean k at 80%% = 2.5 (%f)",
+              c.contrib_k_sum[0][0] / 2.0);
+        CHECK(feq(c.contrib_k_sum[1][0] / 2.0, 3.0), "mean k at 90%% = 3.0 (%f)",
+              c.contrib_k_sum[1][0] / 2.0);
+        CHECK(feq(c.contrib_k_sum[2][0] / 2.0, 3.0), "mean k at 95%% = 3.0 (%f)",
+              c.contrib_k_sum[2][0] / 2.0);
+        CHECK(feq(c.contrib_k_sum[3][0] / 2.0, 4.0), "mean k at 99%% = 4.0");
+        CHECK(c.contrib_k_hist[0][0] == 1 && c.contrib_k_hist[0][3] == 1,
+              "80%% histogram: one token at k=1, one at k=4");
+        CHECK(c.contrib_k_hist[3][3] == 2, "99%% histogram: both tokens at k=4");
+        CHECK(cbad == 0, "no bad ids");
+        poe_accum_free(&c);
+    }
+
     /* ── scores snapshot: reap wins over frequency when present ────────── */
     {
         double sc[8];

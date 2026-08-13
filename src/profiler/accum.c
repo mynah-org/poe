@@ -43,11 +43,17 @@ int poe_accum_init(poe_accum *a, uint32_t n_layers, uint32_t n_experts,
     int ok = a->sel_count && a->gate_sum && a->reap_count && a->reap_sum &&
              a->norm_sum && a->tok_probs && a->tok_sel && a->entropy_sum &&
              a->topk_mass_sum;
+    a->contrib_tok = calloc(n_layers, sizeof *a->contrib_tok);
+    ok = ok && a->contrib_tok;
     for (int i = 0; i < POE_ACCUM_NMASS; i++) {
         a->mass_k_sum[i] = calloc(n_layers, sizeof *a->mass_k_sum[i]);
         a->mass_k_hist[i] = calloc((size_t)n_layers * POE_ACCUM_KHIST,
                                    sizeof *a->mass_k_hist[i]);
-        ok = ok && a->mass_k_sum[i] && a->mass_k_hist[i];
+        a->contrib_k_sum[i]  = calloc(n_layers, sizeof *a->contrib_k_sum[i]);
+        a->contrib_k_hist[i] = calloc((size_t)n_layers * (top_k ? top_k : 1),
+                                      sizeof *a->contrib_k_hist[i]);
+        ok = ok && a->mass_k_sum[i] && a->mass_k_hist[i] &&
+             a->contrib_k_sum[i] && a->contrib_k_hist[i];
     }
     if (!ok) { poe_accum_free(a); return -1; }
     return 0;
@@ -65,7 +71,10 @@ void poe_accum_free(poe_accum *a) {
     for (int i = 0; i < POE_ACCUM_NMASS; i++) {
         free(a->mass_k_sum[i]);
         free(a->mass_k_hist[i]);
+        free(a->contrib_k_sum[i]);
+        free(a->contrib_k_hist[i]);
     }
+    free(a->contrib_tok);
     free(a->topk_mass_sum);
     memset(a, 0, sizeof *a);
 }
@@ -170,7 +179,16 @@ void poe_accum_observe_reap(poe_accum *a, uint32_t layer, uint32_t T,
     double   *rsm = a->reap_sum   + (size_t)layer * E;
     double   *nsm = a->norm_sum   + (size_t)layer * E;
 
+    /* K is the applied expert count, a handful, so a per-token insertion
+     * sort of the contributions costs nothing and keeps this O(1) in the
+     * token count like every other accumulator here. */
+    double contrib[64];
+    const int can_rank = K <= (uint32_t)(sizeof contrib / sizeof contrib[0]);
+
     for (uint32_t t = 0; t < T; t++) {
+        double total = 0;
+        uint32_t n_valid = 0;
+
         for (uint32_t s = 0; s < K; s++) {
             size_t  i = s + (size_t)t * K;
             int32_t e = ids[i];
@@ -178,9 +196,35 @@ void poe_accum_observe_reap(poe_accum *a, uint32_t layer, uint32_t T,
                 if (bad_ids) (*bad_ids)++;
                 continue;
             }
+            const double c = (double)weights[i] * (double)norms[i];
             cnt[e]++;
             nsm[e] += (double)norms[i];
-            rsm[e] += (double)weights[i] * (double)norms[i];
+            rsm[e] += c;
+            if (can_rank) {
+                contrib[n_valid++] = c > 0 ? c : 0.0;
+                total += c > 0 ? c : 0.0;
+            }
+        }
+
+        if (!can_rank || n_valid == 0 || !(total > 0)) continue;
+
+        /* descending insertion sort */
+        for (uint32_t i = 1; i < n_valid; i++) {
+            const double v = contrib[i];
+            uint32_t j = i;
+            while (j > 0 && contrib[j - 1] < v) { contrib[j] = contrib[j - 1]; j--; }
+            contrib[j] = v;
+        }
+
+        a->contrib_tok[layer]++;
+        double cum = 0;
+        uint32_t j = 0;
+        for (int ti = 0; ti < POE_ACCUM_NMASS; ti++) {
+            const double want = poe_accum_mass_thresholds[ti] * total;
+            while (j < n_valid && cum < want) { cum += contrib[j]; j++; }
+            const uint32_t k = j ? j : 1;
+            a->contrib_k_sum[ti][layer] += (double)k;
+            a->contrib_k_hist[ti][(size_t)layer * K + (k - 1)]++;
         }
     }
 }
@@ -235,6 +279,27 @@ void poe_accum_write_json(const poe_accum *a, FILE *f, const char *indent) {
             fprintf(f, "]");
         }
         fprintf(f, "},\n");
+
+        if (a->contrib_tok && a->contrib_tok[l]) {
+            const uint64_t ct = a->contrib_tok[l];
+            fprintf(f, "%s   \"contrib_k_mean\": {", indent);
+            for (int i = 0; i < POE_ACCUM_NMASS; i++)
+                fprintf(f, "%s\"%.2f\": %.3f", i ? ", " : "",
+                        poe_accum_mass_thresholds[i],
+                        a->contrib_k_sum[i][l] / (double)ct);
+            fprintf(f, "},\n");
+            fprintf(f, "%s   \"contrib_k_hist\": {", indent);
+            for (int i = 0; i < POE_ACCUM_NMASS; i++) {
+                fprintf(f, "%s\"%.2f\": [", i ? ", " : "",
+                        poe_accum_mass_thresholds[i]);
+                for (uint32_t k = 0; k < a->top_k; k++)
+                    fprintf(f, "%s%llu", k ? "," : "",
+                            (unsigned long long)a->contrib_k_hist[i][
+                                (size_t)l * a->top_k + k]);
+                fprintf(f, "]");
+            }
+            fprintf(f, "},\n");
+        }
 
         fprintf(f, "%s   \"sel_count\": [", indent);
         for (uint32_t e = 0; e < a->n_experts; e++)

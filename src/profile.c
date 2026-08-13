@@ -21,6 +21,8 @@ void poe_profile_free(poe_profile *p) {
     for (int i = 0; i < POE_PROFILE_NMASS; i++) {
         free(p->mass_k[i]);
         free(p->mass_k_hist[i]);
+        free(p->contrib_k[i]);
+        free(p->contrib_k_hist[i]);
     }
     free(p->topk_mass);
     free(p->sel_count);
@@ -112,6 +114,28 @@ int poe_profile_load(poe_profile **out, const char *path,
         if (p->topk_mass == NULL) p->topk_mass = calloc(L, sizeof *p->topk_mass);
         if (p->topk_mass != NULL)
             p->topk_mass[li] = poe_json_num(poe_json_get(lj, "topk_mass_mean"), 0.0);
+
+        const poe_json *ck = poe_json_get(lj, "contrib_k_mean");
+        for (int i = 0; ck != NULL && i < POE_PROFILE_NMASS; i++) {
+            if (p->contrib_k[i] == NULL)
+                p->contrib_k[i] = calloc(L, sizeof *p->contrib_k[i]);
+            if (p->contrib_k[i] != NULL)
+                p->contrib_k[i][li] = poe_json_num(poe_json_get(ck, MASS_KEYS[i]), 0.0);
+        }
+        const poe_json *chh = poe_json_get(lj, "contrib_k_hist");
+        for (int i = 0; chh != NULL && i < POE_PROFILE_NMASS; i++) {
+            const poe_json *bins = poe_json_get(chh, MASS_KEYS[i]);
+            const size_t nb = poe_json_len(bins);
+            if (nb == 0) continue;
+            if (p->contrib_k_hist[i] == NULL) {
+                p->contrib_k_hist[i] = calloc((size_t)L * (p->top_k ? p->top_k : 1),
+                                              sizeof *p->contrib_k_hist[i]);
+                if (p->contrib_k_hist[i] == NULL) continue;
+            }
+            for (size_t b = 0; b < nb && b < (size_t)(p->top_k ? p->top_k : 1); b++)
+                p->contrib_k_hist[i][(size_t)li * (p->top_k ? p->top_k : 1) + b] =
+                    poe_json_u64(poe_json_at(bins, b), 0);
+        }
 
         const poe_json *mh = poe_json_get(lj, "mass_k_hist");
         for (int i = 0; mh != NULL && i < POE_PROFILE_NMASS; i++) {

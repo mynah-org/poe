@@ -123,6 +123,58 @@ static void print_mass_k(const poe_profile *pr) {
            "  is what token-adaptive routing could recover — and nothing else can.\n");
 }
 
+/* The same question asked of output contribution instead of probability
+ * mass. R9 established that mass governs nothing here — the top-8 holds a
+ * sixth of it and the model is fine — so the quantity that decides whether K
+ * can fall is how concentrated the *contribution* of the experts we already
+ * run is. Bounded by top_k, which is what makes it a statement about K. */
+static void print_contrib_k(const poe_profile *pr) {
+    static const double thr[POE_PROFILE_NMASS] = { 0.80, 0.90, 0.95, 0.99 };
+    int any = 0;
+    for (int i = 0; i < POE_PROFILE_NMASS; i++) any |= pr->contrib_k_hist[i] != NULL;
+    if (!any) {
+        printf("\nContribution concentration inside the applied top-k\n");
+        printf("  needs a profile captured with --metric reap\n");
+        return;
+    }
+    const uint32_t K = pr->top_k ? pr->top_k : 1;
+    printf("\nContribution concentration inside the applied top-%u   "
+           "(gate x ||expert output||)\n", K);
+    printf("  share    mean k   p50   p90   p99   share of tokens needing all %u\n", K);
+    for (int i = 0; i < POE_PROFILE_NMASS; i++) {
+        if (pr->contrib_k_hist[i] == NULL) continue;
+        uint64_t bins[64] = { 0 };
+        uint64_t total = 0;
+        const uint32_t nb = K < 64 ? K : 64;
+        for (uint32_t b = 0; b < nb; b++) {
+            for (uint32_t l = 0; l < pr->n_layers; l++)
+                bins[b] += pr->contrib_k_hist[i][(size_t)l * K + b];
+            total += bins[b];
+        }
+        if (total == 0) continue;
+
+        double mean = 0;
+        for (uint32_t b = 0; b < nb; b++) mean += (double)(b + 1) * (double)bins[b];
+        mean /= (double)total;
+
+        uint32_t q[3] = { 1, 1, 1 };
+        const double want[3] = { 0.50, 0.90, 0.99 };
+        uint64_t cum = 0;
+        int qi = 0;
+        for (uint32_t b = 0; b < nb; b++) {
+            cum += bins[b];
+            while (qi < 3 && (double)cum / (double)total >= want[qi]) q[qi++] = b + 1;
+        }
+        while (qi < 3) q[qi++] = nb;
+
+        printf("  %3.0f%%    %6.2f  %4u  %4u  %4u        %5.1f%%\n",
+               thr[i] * 100.0, mean, q[0], q[1], q[2],
+               100.0 * (double)bins[nb - 1] / (double)total);
+    }
+    printf("\n  A K below the p99 column costs the tail of tokens some of their\n"
+           "  contribution; a K at or above it costs nothing measurable here.\n");
+}
+
 /* Σ_blocks min(K, E_b) · per-expert params. Per-block so that a model with
  * heterogeneous expert counts still adds up exactly. */
 static uint64_t routed_params_at_k(const poe_model *m, uint32_t k) {
@@ -260,6 +312,7 @@ int poe_cmd_routing_budget(int argc, char **argv) {
             printf("\nwarning: the profile was captured from a different "
                    "checkpoint\n");
         print_mass_k(pr);
+        print_contrib_k(pr);
         poe_profile_free(pr);
     }
 
