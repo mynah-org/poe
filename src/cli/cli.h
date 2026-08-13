@@ -19,6 +19,7 @@ int poe_cmd_quantplan(int argc, char **argv);
 int poe_cmd_requant(int argc, char **argv);
 int poe_cmd_split(int argc, char **argv);
 int poe_cmd_validate(int argc, char **argv);
+int poe_cmd_residency(int argc, char **argv);
 
 /* Reopen a pruned checkpoint and verify it against the plan (prints its
  * findings, returns 0 when clean). Shared by apply and forge. */

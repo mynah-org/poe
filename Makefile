@@ -11,12 +11,13 @@ LDLIBS   = -lpthread -lm
 
 LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
            src/profiler/imatrix.c src/imatrix_stats.c src/json.c src/stats.c \
-           src/profile.c src/plan.c src/apply.c src/ggufw.c src/quantplan.c src/rank.c src/requant.c src/split.c
+           src/profile.c src/plan.c src/apply.c src/ggufw.c src/quantplan.c src/rank.c src/requant.c src/split.c \
+           src/residency.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c src/cli/cmd_plan.c \
            src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c \
            src/cli/cmd_forge.c src/cli/cmd_validate.c src/cli/cmd_quantplan.c \
-           src/cli/cmd_requant.c src/cli/cmd_split.c
+           src/cli/cmd_requant.c src/cli/cmd_split.c src/cli/cmd_residency.c
 INGOT    = third_party/ingot/ingot.c
 
 SRC      = $(LIB_SRC) $(CLI_SRC) $(INGOT)
@@ -46,7 +47,8 @@ build:
 ## test: synthetic-fixture tests + a CLI smoke run (no model downloads)
 test: build/test_model build/test_accum build/test_compare build/test_plan \
       build/test_apply build/test_imatrix build/test_imatrix_stats \
-      build/test_quantplan build/test_requant build/test_split poe | build
+      build/test_quantplan build/test_requant build/test_split \
+      build/test_residency poe | build
 	./build/test_model
 	./build/test_accum
 	./build/test_imatrix build/test.imatrix.gguf
@@ -57,6 +59,7 @@ test: build/test_model build/test_accum build/test_compare build/test_plan \
 	./build/test_quantplan build/fixture-moe.gguf build/plan.poeprofile
 	./build/test_requant
 	./build/test_split
+	./build/test_residency
 	@echo "── poe inspect (smoke) ──"
 	./poe inspect build/fixture-moe.gguf
 	./poe inspect build/fixture-moe.gguf --json > /dev/null
@@ -82,6 +85,11 @@ test: build/test_model build/test_accum build/test_compare build/test_plan \
 	./poe quantplan build/fixture-moe.gguf --target-size 15% \
 	    --imatrix build/test-stats.imatrix.gguf -o build/imat.poequant \
 	    --tensor-types build/imat.tt
+	./poe residency build/fixture-moe.gguf --vram 1G --ctx 512
+	./poe residency build/fixture-moe.gguf --vram 9400K --ctx 512 --reserve 1M
+	./poe residency build/fixture-moe.gguf --vram 9400K --ctx 512 --reserve 1M --json > /dev/null
+	./poe residency build/fixture-moe.gguf --vram 9400K --ctx 512 --reserve 1M --emit-flags
+	! ./poe residency build/fixture-moe.gguf --vram 1M > /dev/null 2>&1
 	./poe quantplan build/fixture-moe.gguf --target-size 15% -o build/uni.poequant
 	./poe diff build/imat.poequant build/uni.poequant
 	./poe diff build/smoke.poeplan build/smoke50.poeplan
@@ -118,6 +126,11 @@ build/test_requant: tests/test_requant.o tests/fixture.o src/requant.o \
 build/test_split: tests/test_split.o tests/fixture.o src/split.o \
                   src/ggufw.o src/rank.o src/profile.o src/json.o \
                   src/model.o src/fmt.o third_party/ingot/ingot.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
+build/test_residency: tests/test_residency.o tests/fixture.o src/residency.o \
+                      src/profile.o src/json.o src/model.o src/fmt.o \
+                      third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 build/test_compare: tests/test_compare.o src/json.o src/profile.o | build

@@ -26,6 +26,9 @@ static const char USAGE[] =
 "                  [--prune P] [-o out.poeplan]\n"
 "  estimate        <plan.poeplan> [model.gguf]       plan accounting (+ verification)\n"
 "  diff            <a> <b>                           diff plans, profiles, or models\n"
+"  residency       <model.gguf> --vram 24G           what fits on the device you have,\n"
+"                  [--ctx N] [--rank R]             and the llama.cpp flags that\n"
+"                  [--emit-flags]                   place the rest on the host\n"
 "  quantplan       <model.gguf> --target-size S      mixed precision per expert slab:\n"
 "                  [--profile <p>] [--types ...]     spend a byte budget on the slabs\n"
 "                  [--tensor-types out.txt]          that matter, emit llama-quantize\n"
@@ -84,6 +87,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "requant")  == 0) return poe_cmd_requant(sub_argc, sub_argv);
     if (strcmp(cmd, "split")    == 0) return poe_cmd_split(sub_argc, sub_argv);
     if (strcmp(cmd, "validate") == 0) return poe_cmd_validate(sub_argc, sub_argv);
+    if (strcmp(cmd, "residency") == 0) return poe_cmd_residency(sub_argc, sub_argv);
 
     if (strcmp(cmd, "profile")  == 0) {
         fprintf(stderr, "poe profile: use the standalone poe-profile tool "
