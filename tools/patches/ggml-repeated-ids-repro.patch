@@ -1,0 +1,99 @@
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 6688deb..88ff1eb 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -4404,7 +4404,7 @@ struct test_mul_mat_hadamard : public test_mul_mat {
+     }
+ };
+ 
+-static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats) {
++static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats, int repeat_ids = 0) {
+     std::random_device rd;
+     std::default_random_engine rng(rd());
+     for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+@@ -4413,10 +4413,30 @@ static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats) {
+             // ids
+             for (int64_t r = 0; r < ggml_nrows(t); r++) {
+                 std::vector<int32_t> data(t->ne[0]);
+-                for (int i = 0; i < t->ne[0]; i++) {
+-                    data[i] = i % n_mats;
++                if (repeat_ids == 2) {
++                    // exactly one duplicated pair per row: if only the
++                    // duplicated slots are wrong, the error is a fraction of
++                    // the rows, not all of them
++                    for (int i = 0; i < t->ne[0]; i++) {
++                        data[i] = i % n_mats;
++                    }
++                    if (t->ne[0] > 1) { data[1] = data[0]; }
++                } else if (repeat_ids) {
++                    // The same expert named twice in a row. Nothing forbids
++                    // this: the CPU path handles it, and a caller that
++                    // substitutes ids (padding a partial expert set, for
++                    // instance) will produce it. Left unshuffled so that any
++                    // prefix of the row - which is what a view of n_used
++                    // columns takes - contains a repeat.
++                    for (int i = 0; i < t->ne[0]; i++) {
++                        data[i] = (i / 2) % n_mats;
++                    }
++                } else {
++                    for (int i = 0; i < t->ne[0]; i++) {
++                        data[i] = i % n_mats;
++                    }
++                    std::shuffle(data.begin(), data.end(), rng);
+                 }
+-                std::shuffle(data.begin(), data.end(), rng);
+                 ggml_backend_tensor_set(t, data.data(), r * t->nb[1], t->ne[0] * sizeof(int32_t));
+             }
+         } else {
+@@ -4435,9 +4455,10 @@ struct test_mul_mat_id : public test_case {
+     const int64_t m;
+     const int64_t n;
+     const int64_t k;
++    const int repeat_ids; // 0 none, 1 every pair repeats, 2 one pair repeats
+ 
+     std::string vars() override {
+-        return VARS_TO_STR8(type_a, type_b, n_mats, n_used, b, m, n, k);
++        return VARS_TO_STR9(type_a, type_b, n_mats, n_used, b, m, n, k, repeat_ids);
+     }
+ 
+     double max_nmse_err() override {
+@@ -4459,9 +4480,10 @@ struct test_mul_mat_id : public test_case {
+ 
+     test_mul_mat_id(ggml_type type_a = GGML_TYPE_F32, ggml_type type_b = GGML_TYPE_F32,
+             int n_mats = 8, int n_used = 2, bool b = false,
+-            int64_t m = 32, int64_t n = 32, int64_t k = 32)
++            int64_t m = 32, int64_t n = 32, int64_t k = 32,
++            int repeat_ids = 0)
+         : type_a(type_a), type_b(type_b), n_mats(n_mats), n_used(n_used), b(b),
+-            m(m), n(n), k(k) {
++            m(m), n(n), k(k), repeat_ids(repeat_ids) {
+             GGML_ASSERT(n_used <= n_mats);
+         }
+ 
+@@ -4487,7 +4509,7 @@ struct test_mul_mat_id : public test_case {
+     }
+ 
+     void initialize_tensors(ggml_context * ctx) override {
+-        init_mul_mat_id_tensors(ctx, n_mats);
++        init_mul_mat_id_tensors(ctx, n_mats, repeat_ids);
+     }
+ };
+ 
+@@ -9036,6 +9058,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_mul_mat_id_fusion(GGML_TYPE_F16, GGML_TYPE_F32, 16, 16, false, 32, 32, 32, 3));
+ 
+     // gpt-oss issue with Vulkan mmq_id
++    // repeated ids: the same expert named twice by one token
++    for (ggml_type type_a : {GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
++        for (int n : {1, 16, 256}) { // 1 takes the vector path, the rest do not
++            for (int rep : {1, 2}) {
++                for (bool bcast : {false, true}) {
++                    test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 16, 8, bcast, 128, n, 256, rep));
++                }
++            }
++        }
++    }
++
+     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 2, false, 2880, 32, 2880));
+     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_0, GGML_TYPE_F32, 32, 2, false, 2880, 32, 2880));
+ 

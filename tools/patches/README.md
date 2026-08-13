@@ -166,13 +166,39 @@ Two measurements settled it, both cheap:
   difference is that no two slots name the same expert. It **runs to
   completion at full batch**. That is the whole hypothesis, isolated.
 
-### The fix
+### The fix — and precisely what it does not fix
 
 `mm_ids_helper` compacts per *use* instead of per token: a warp-level prefix
 sum gives every matching slot of a token its own row, and the shared-memory
 store is sized `n_tokens * n_expert_used` to hold the worst case. Both the
 generic and the specialized branch are changed; the generic one had a second
 form of the same bug, keeping only the last match of a strided loop.
+
+**That removes the illegal memory access. It does not make repeated ids
+numerically correct on CUDA**, and the distinction matters to anyone reusing
+this patch. Measured with a reproducer added to ggml's own test suite
+(`ggml-repeated-ids-repro.patch`, applied on top of a build that already
+carries the fix above):
+
+| ids | path | result vs the CPU reference |
+|---|---|---|
+| one duplicated pair of 8 slots | f16 / q8_0 / q4_0, batch 1–256 | NMSE ≈ 0.14 |
+| every pair duplicated | same | NMSE ≈ 1.0 |
+| any duplication | q8_0 / q4_0 at batch 1 (vector path) | correct |
+
+The damage is **local**: one wrong output row per duplicated slot, roughly
+1/8 of the rows when 1 of 8 slots repeats, and it appears on both the
+broadcast and the non-broadcast activation paths. Somewhere past
+`mm_ids_helper` at least one more consumer still assumes an id cannot repeat;
+this patch does not find it.
+
+**Why the split checkpoint measures correct anyway.** Its duplicated slots
+are the stand-ins, which the merge multiplies by zero, and the paired
+measurement above (0.19σ against the `mul_mat_vec_q` path over 100 chunks)
+says the shipped artifact is unaffected. That is a measurement, not a proof:
+a stand-in can in principle collide with a *real* hot id, and nothing here
+establishes which of the two colliding rows comes out wrong. A design that
+cannot mask its duplicates must not reuse this patch and assume correctness.
 
 One trap on the way, worth remembering: `warp_reduce_sum<width>` **cannot** be
 used to sum within a token group. On Ampere and later it calls
@@ -201,6 +227,26 @@ One real bug was found earlier on the way: `ggml_clamp` is in-place and
 returns a view of its input (`ggml.h` says so), so the hot ids, cold ids and
 mask each need their own cast of the selection — sharing one buffer made the
 clamps race, which CPU graph order hides.
+
+### `ggml-repeated-ids-repro.patch` — the reproducer, for upstream
+
+ggml's own test suite never exercises this: `init_mul_mat_id_tensors` fills
+each ids row with `i % n_mats` and shuffles, so within a row the ids are
+distinct by construction. The patch adds a `repeat_ids` mode to
+`test_mul_mat_id` and registers cases across f16/q8_0/q4_0, batch 1/16/256,
+broadcast and not.
+
+```sh
+cd llama.cpp
+git apply /path/to/poe/tools/patches/ggml-repeated-ids-repro.patch
+cmake --build build --target test-backend-ops -j
+./build/bin/test-backend-ops -o MUL_MAT_ID
+```
+
+It reproduces on stock llama.cpp — `mmid.cu` is byte-identical between the
+pinned b1-69bf643 and upstream master 88 commits later, and no commit has
+touched it. The CPU backend is the reference the comparison is made against,
+and nothing in `ggml.h` documents a uniqueness requirement on ids.
 
 ### Diagnostics left in the patch, deliberately
 
