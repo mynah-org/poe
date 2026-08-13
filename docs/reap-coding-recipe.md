@@ -52,16 +52,25 @@ Result at 25%: **17.3 GiB → 13.2 GiB (−23.7%)**, coding eval **10/10 vs
   the plan diff between `reap` and `frequency` prune sets is a useful
   sanity check (`poe diff a.poeplan b.poeplan`).
 
-## 2. Workload identity is real
+## 2. Workload identity is real — measured against its noise floor
 
-Profiles from different workloads disagree exactly where you'd hope:
-coding vs general-text profiles on the same checkpoint overlap only
-~0.52 (Jaccard) in their bottom-25% prune sets (`poe compare`, confirmed
-independently by `poe diff` on the resulting plans). That disagreement
-is the whole justification for *task-specific* pruning: a generic pruned
-model and a coding pruned model are different artifacts. Weighted blends
-(`--profile coding:0.7 --profile general:0.3`) are supported when you
+Profiles from different workloads disagree exactly where you'd hope: coding
+vs general-prose profiles on the same checkpoint agree on only **0.23**
+(Jaccard) of their bottom-25% prune sets, against a **noise floor of
+0.59–0.64** — what two disjoint samples of the *same* coding corpus score
+against each other. The signal sits ~2.8× below the floor, on two
+checkpoints and two independently sampled corpora.
+
+That gap is the whole justification for *task-specific* pruning: a generic
+pruned model and a coding pruned model are different artifacts. Weighted
+blends (`--profile coding:0.7 --profile general:0.3`) are supported when you
 want a hedge.
+
+**Never quote an overlap without its control.** An earlier version of this
+section gave ~0.52 for the same comparison, measured without a floor; it sits
+only 0.12 below one and demonstrates nothing on its own. Full write-up,
+including why that figure was weak, in
+[profile-noise-floor.md](profile-noise-floor.md).
 
 ## 3. Plan, then look at it
 
