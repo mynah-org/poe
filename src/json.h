@@ -34,5 +34,9 @@ size_t          poe_json_len(const poe_json *j);   /* arr/obj element count */
 double      poe_json_num(const poe_json *j, double dflt);
 uint64_t    poe_json_u64(const poe_json *j, uint64_t dflt);  /* exact for counters */
 const char *poe_json_str(const poe_json *j, const char *dflt);
+/* JSON true/false. Numbers do not answer here and booleans do not answer to
+ * poe_json_num: a bool read through the number accessor silently returns the
+ * default, which is how a round-tripped flag turns itself off. */
+int         poe_json_bool(const poe_json *j, int dflt);
 
 #endif

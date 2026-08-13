@@ -24,6 +24,8 @@ int poe_cmd_plan(int argc, char **argv) {
     size_t      n_prof = 0;
     double      prune = 0.25;
     int         force = 0;
+    int         protect_super = 1;    /* M10: on by default, see docs */
+    double      super_z = 0;
 
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
@@ -49,6 +51,10 @@ int poe_cmd_plan(int argc, char **argv) {
         }
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
         else if (strcmp(argv[i], "--force") == 0) force = 1;
+        else if (strcmp(argv[i], "--protect-super-experts") == 0) protect_super = 1;
+        else if (strcmp(argv[i], "--no-protect-super-experts") == 0) protect_super = 0;
+        else if (strcmp(argv[i], "--super-z") == 0 && i + 1 < argc)
+            super_z = atof(argv[++i]);
         else if (argv[i][0] == '-') {
             fprintf(stderr, "poe plan: unknown option '%s'\n", argv[i]);
             return 2;
@@ -62,7 +68,12 @@ int poe_cmd_plan(int argc, char **argv) {
     if (model_path == NULL || n_prof == 0) {
         fprintf(stderr, "usage: poe plan <model.gguf> --profile <p.poeprofile[:W]> ...\n"
                         "               [--method reap|frequency|gate] [--prune P]\n"
-                        "               [-o out.poeplan] [--force]\n");
+                        "               [-o out.poeplan] [--force]\n"
+                        "               [--no-protect-super-experts] [--super-z Z]\n"
+                        "\n"
+                        "  activation-magnitude outliers are lifted out of the cut by\n"
+                        "  default and the next candidates take their place, so the\n"
+                        "  size target is unchanged (M10, docs/super-experts.md)\n");
         return 2;
     }
 
@@ -84,9 +95,12 @@ int poe_cmd_plan(int argc, char **argv) {
     }
 
     poe_plan *plan;
-    if (poe_plan_build(&plan, m,
-                       (const poe_profile *const *)profs, pweights, n_prof,
-                       method, prune, force, err, sizeof err) != 0) {
+    const poe_plan_opts opts = {
+        .profiles = (const poe_profile *const *)profs, .weights = pweights,
+        .n_profiles = n_prof, .method = method, .prune_frac = prune,
+        .force = force, .protect_super = protect_super, .super_z = super_z
+    };
+    if (poe_plan_build_opts(&plan, m, &opts, err, sizeof err) != 0) {
         fprintf(stderr, "poe plan: %s\n", err);
         goto done;
     }
@@ -114,6 +128,13 @@ int poe_cmd_plan(int argc, char **argv) {
     poe_format_bytes(plan->bytes_before - plan->bytes_removed, b2, sizeof b2);
     poe_format_params(plan->params_before - plan->params_removed, p1, sizeof p1);
     printf("exact     remove %s  ->  %s on disk, %s params\n", b1, b2, p1);
+    if (plan->protect_super) {
+        printf("super     %u activation outliers flagged (%u of them rarely "
+               "selected)\n", plan->n_super_flagged, plan->n_super_rare);
+        printf("          %u rescued from this cut%s\n", plan->n_super_rescued,
+               plan->n_super_rescued ? "" :
+               "  — the ranking was already keeping them");
+    }
     for (uint32_t i = 0; i < plan->n_warnings; i++)
         printf("warning   %s\n", plan->warnings[i]);
 

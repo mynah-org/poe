@@ -12,7 +12,7 @@ LDLIBS   = -lpthread -lm
 LIB_SRC  = src/model.c src/fmt.c src/profiler/accum.c src/profiler/stability.c \
            src/profiler/imatrix.c src/imatrix_stats.c src/json.c src/stats.c \
            src/profile.c src/plan.c src/apply.c src/ggufw.c src/quantplan.c src/rank.c src/requant.c src/split.c \
-           src/residency.c
+           src/residency.c src/super.c
 CLI_SRC  = src/cli/main.c src/cli/cmd_inspect.c src/cli/cmd_experts.c \
            src/cli/cmd_budget.c src/cli/cmd_compare.c src/cli/cmd_plan.c \
            src/cli/cmd_estimate.c src/cli/cmd_diff.c src/cli/cmd_apply.c \
@@ -48,7 +48,7 @@ build:
 test: build/test_model build/test_accum build/test_compare build/test_plan \
       build/test_apply build/test_imatrix build/test_imatrix_stats \
       build/test_quantplan build/test_requant build/test_split \
-      build/test_residency poe | build
+      build/test_residency build/test_super poe | build
 	./build/test_model
 	./build/test_accum
 	./build/test_imatrix build/test.imatrix.gguf
@@ -60,6 +60,7 @@ test: build/test_model build/test_accum build/test_compare build/test_plan \
 	./build/test_requant
 	./build/test_split
 	./build/test_residency
+	./build/test_super
 	@echo "── poe inspect (smoke) ──"
 	./poe inspect build/fixture-moe.gguf
 	./poe inspect build/fixture-moe.gguf --json > /dev/null
@@ -133,16 +134,22 @@ build/test_residency: tests/test_residency.o tests/fixture.o src/residency.o \
                       third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
+build/test_super: tests/test_super.o tests/fixture.o src/super.o src/plan.o \
+                  src/profile.o src/json.o src/model.o src/fmt.o \
+                  third_party/ingot/ingot.o | build
+	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
+
 build/test_compare: tests/test_compare.o src/json.o src/profile.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 build/test_plan: tests/test_plan.o tests/fixture.o src/plan.o src/profile.o \
-                 src/json.o src/model.o src/fmt.o third_party/ingot/ingot.o | build
+                 src/super.o src/json.o src/model.o src/fmt.o \
+                 third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 build/test_apply: tests/test_apply.o tests/fixture.o src/apply.o src/plan.o \
-                  src/profile.o src/json.o src/model.o src/fmt.o src/ggufw.o \
-                  third_party/ingot/ingot.o | build
+                  src/profile.o src/super.o src/json.o src/model.o src/fmt.o \
+                  src/ggufw.o third_party/ingot/ingot.o | build
 	$(CC) $(WARN) $(CFLAGS) $^ $(LDLIBS) -o $@
 
 ## profiler: build/poe-profile — MoE router profiler over llama.cpp (M2).

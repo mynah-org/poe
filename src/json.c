@@ -277,6 +277,10 @@ double poe_json_num(const poe_json *j, double dflt) {
     return (j && j->kind == POE_JSON_NUM) ? j->num : dflt;
 }
 
+int poe_json_bool(const poe_json *j, int dflt) {
+    return (j && j->kind == POE_JSON_BOOL) ? j->boolean : dflt;
+}
+
 uint64_t poe_json_u64(const poe_json *j, uint64_t dflt) {
     if (j == NULL || j->kind != POE_JSON_NUM) return dflt;
     return j->u64_exact ? j->u64 : (uint64_t)j->num;

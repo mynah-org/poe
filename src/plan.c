@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "poe/super.h"
+
 #include "json.h"
 
 static int fail(char *err, size_t errsz, const char *msg) {
@@ -60,8 +62,25 @@ int poe_plan_build(poe_plan **out, const poe_model *m,
                    const poe_profile *const *profiles, const double *weights,
                    size_t n_profiles, const char *method, double prune_frac,
                    int force, char *err, size_t errsz) {
-    if (out == NULL) return -1;
+    const poe_plan_opts o = {
+        .profiles = profiles, .weights = weights, .n_profiles = n_profiles,
+        .method = method, .prune_frac = prune_frac, .force = force,
+        .protect_super = 0, .super_z = 0
+    };
+    return poe_plan_build_opts(out, m, &o, err, errsz);
+}
+
+int poe_plan_build_opts(poe_plan **out, const poe_model *m,
+                        const poe_plan_opts *o, char *err, size_t errsz) {
+    if (out == NULL || o == NULL) return -1;
     *out = NULL;
+
+    const poe_profile *const *profiles = o->profiles;
+    const double *weights = o->weights;
+    const size_t  n_profiles = o->n_profiles;
+    const char   *method = o->method;
+    const double  prune_frac = o->prune_frac;
+    const int     force = o->force;
 
     if (n_profiles == 0) return fail(err, errsz, "at least one profile needed");
     if (prune_frac <= 0.0 || prune_frac >= 1.0)
@@ -119,11 +138,39 @@ int poe_plan_build(poe_plan **out, const poe_model *m,
     if (p->keep == NULL) { poe_plan_free(p); return fail(err, errsz, "out of memory"); }
     memset(p->keep, 1, (size_t)L * E);
 
+    /* Super-expert protection: detected once, over the first profile that
+     * carries activation norms. Asking for it and not getting it is a
+     * warning, not a silent no-op — the guard exists against a failure that
+     * leaves the model fluent. */
+    poe_super *sup = NULL;
+    p->protect_super = o->protect_super;
+    if (o->protect_super) {
+        char serr[256] = { 0 };
+        for (size_t i = 0; i < n_profiles && sup == NULL; i++)
+            poe_super_detect(&sup, profiles[i], o->super_z, serr, sizeof serr);
+        if (sup == NULL) {
+            warn(p, "super-expert protection asked for but no profile carries "
+                    "activation norms (--metric reap): NOT protected");
+            p->protect_super = 0;
+        } else {
+            p->n_super_flagged = (uint32_t)sup->n_outliers;
+            p->n_super_rare    = (uint32_t)sup->n_rare_outliers;
+            if (sup->n_layers_undecidable) {
+                char msg[160];
+                snprintf(msg, sizeof msg, "%u layers have a flat activation "
+                         "profile: no outlier can be decided there",
+                         sup->n_layers_undecidable);
+                warn(p, msg);
+            }
+        }
+    }
+
     double *score = malloc(E * sizeof *score);
     double *one   = malloc(E * sizeof *one);
     ent    *order = malloc(E * sizeof *order);
     if (!score || !one || !order) {
         free(score); free(one); free(order);
+        poe_super_free(sup);
         poe_plan_free(p);
         return fail(err, errsz, "out of memory");
     }
@@ -134,6 +181,7 @@ int poe_plan_build(poe_plan **out, const poe_model *m,
         for (size_t i = 0; i < n_profiles; i++) {
             if (layer_scores(profiles[i], method, l, one) != 0) {
                 free(score); free(one); free(order);
+                poe_super_free(sup);
                 poe_plan_free(p);
                 return fail(err, errsz, strcmp(method, "reap") == 0
                             ? "method 'reap' needs profiles captured with --metric reap"
@@ -152,10 +200,47 @@ int poe_plan_build(poe_plan **out, const poe_model *m,
 
         for (uint32_t e = 0; e < E; e++) { order[e].v = score[e]; order[e].idx = e; }
         qsort(order, E, sizeof *order, cmp_asc);
+
+        if (sup == NULL) {
+            for (uint32_t i = 0; i < prune_n; i++)
+                p->keep[(size_t)l * E + order[i].idx] = 0;
+            continue;
+        }
+
+        /* The unprotected cut is exactly order[0 .. prune_n-1]; anything
+         * flagged inside it is what protection is actually buying. */
+        const uint8_t *flag = sup->is_outlier + (size_t)l * E;
         for (uint32_t i = 0; i < prune_n; i++)
+            if (flag[order[i].idx]) p->n_super_rescued++;
+
+        /* Prune the same number of experts, skipping the flagged ones: the
+         * per-layer keep count has to stay uniform, because poe apply
+         * rejects a plan where it is not. */
+        uint32_t pruned = 0;
+        for (uint32_t i = 0; i < E && pruned < prune_n; i++) {
+            if (flag[order[i].idx]) continue;
             p->keep[(size_t)l * E + order[i].idx] = 0;
+            pruned++;
+        }
+        /* Only reachable when a layer holds more flagged experts than the
+         * cut can spare. Take the least salient of them and say so. */
+        for (uint32_t i = 0; i < E && pruned < prune_n; i++) {
+            if (!p->keep[(size_t)l * E + order[i].idx]) continue;
+            p->keep[(size_t)l * E + order[i].idx] = 0;
+            p->n_super_still_pruned++;
+            if (i < prune_n) p->n_super_rescued--;   /* it was not rescued */
+            pruned++;
+        }
     }
     free(score); free(one); free(order);
+    if (p->n_super_still_pruned) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "%u flagged experts had to be pruned anyway: "
+                 "a layer holds more of them than this cut can spare",
+                 p->n_super_still_pruned);
+        warn(p, msg);
+    }
+    poe_super_free(sup);
 
     /* exact accounting from the model: pruned expert slices + router rows */
     p->bytes_before  = m->total_bytes;
@@ -197,6 +282,13 @@ int poe_plan_write(const poe_plan *p, const char *path,
     fprintf(f, "  \"n_layers\": %u, \"n_experts\": %u, \"top_k\": %u,\n",
             p->n_layers, p->n_experts, p->top_k);
     fprintf(f, "  \"keep_per_layer\": %u,\n", p->keep_per_layer);
+    fprintf(f, "  \"super_experts\": {\n");
+    fprintf(f, "    \"protected\": %s,\n", p->protect_super ? "true" : "false");
+    fprintf(f, "    \"flagged\": %u,\n", p->n_super_flagged);
+    fprintf(f, "    \"rare\": %u,\n", p->n_super_rare);
+    fprintf(f, "    \"rescued\": %u,\n", p->n_super_rescued);
+    fprintf(f, "    \"pruned_anyway\": %u\n", p->n_super_still_pruned);
+    fprintf(f, "  },\n");
     fprintf(f, "  \"expected\": {\n");
     fprintf(f, "    \"bytes_before\": %llu,\n", (unsigned long long)p->bytes_before);
     fprintf(f, "    \"bytes_removed\": %llu,\n", (unsigned long long)p->bytes_removed);
@@ -274,6 +366,15 @@ int poe_plan_load(poe_plan **out, const char *path, char *err, size_t errsz) {
     p->top_k     = (uint32_t)poe_json_u64(poe_json_get(j, "top_k"), 0);
     p->keep_per_layer =
         (uint32_t)poe_json_u64(poe_json_get(j, "keep_per_layer"), 0);
+    const poe_json *se = poe_json_get(j, "super_experts");
+    if (se != NULL) {
+        p->protect_super = poe_json_bool(poe_json_get(se, "protected"), 0);
+        p->n_super_flagged     = (uint32_t)poe_json_u64(poe_json_get(se, "flagged"), 0);
+        p->n_super_rare        = (uint32_t)poe_json_u64(poe_json_get(se, "rare"), 0);
+        p->n_super_rescued     = (uint32_t)poe_json_u64(poe_json_get(se, "rescued"), 0);
+        p->n_super_still_pruned =
+            (uint32_t)poe_json_u64(poe_json_get(se, "pruned_anyway"), 0);
+    }
 
     const poe_json *ex = poe_json_get(j, "expected");
     p->bytes_before   = poe_json_u64(poe_json_get(ex, "bytes_before"), 0);

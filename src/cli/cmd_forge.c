@@ -169,8 +169,14 @@ int poe_cmd_forge(int argc, char **argv) {
     }
 
     /* ── plan + exact estimate ──────────────────────────────────────────── */
-    if (poe_plan_build(&plan, m, (const poe_profile *const *)profs, pweights,
-                       n_prof, method, prune, force, err, sizeof err) != 0) {
+    /* Same default as `poe plan`: forge is that pipeline in one command, so
+     * it must not quietly ship a weaker guard. */
+    const poe_plan_opts plan_opts = {
+        .profiles = (const poe_profile *const *)profs, .weights = pweights,
+        .n_profiles = n_prof, .method = method, .prune_frac = prune,
+        .force = force, .protect_super = 1, .super_z = 0
+    };
+    if (poe_plan_build_opts(&plan, m, &plan_opts, err, sizeof err) != 0) {
         fprintf(stderr, "poe forge: %s\n", err);
         goto done;
     }

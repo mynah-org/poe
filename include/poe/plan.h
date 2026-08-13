@@ -37,6 +37,17 @@ typedef struct {
     uint64_t bytes_before, bytes_removed;
     uint64_t params_before, params_removed;
 
+    /* Super-expert protection (M10). `rescued` is the number the ranking
+     * would have deleted and protection kept — the only figure that says
+     * whether the guard did anything, and the one to quote. `still_pruned`
+     * is non-zero only when a layer held more flagged experts than the cut
+     * could spare, which is loud rather than silent. */
+    int      protect_super;
+    uint32_t n_super_flagged;
+    uint32_t n_super_rare;
+    uint32_t n_super_rescued;
+    uint32_t n_super_still_pruned;
+
     uint32_t n_warnings;
     char     warnings[POE_PLAN_MAX_WARN][160];
 } poe_plan;
@@ -51,6 +62,30 @@ int poe_plan_build(poe_plan **out, const poe_model *m,
                    const poe_profile *const *profiles, const double *weights,
                    size_t n_profiles, const char *method, double prune_frac,
                    int force, char *err, size_t errsz);
+
+/* The same, plus super-expert protection (M10). Flagged experts are lifted
+ * out of the cut and the *next* candidates take their place, so the per-layer
+ * keep count — which `poe apply` requires to be uniform — is unchanged and
+ * the byte accounting stays exact. Protection needs a profile with
+ * activation norms; without one it is reported as unavailable, never
+ * silently skipped.
+ *
+ * `protect_super` defaults on at the CLI, because the failure it guards
+ * against is silent: a model that lost three super experts still writes
+ * fluent text. */
+typedef struct {
+    const poe_profile *const *profiles;
+    const double *weights;
+    size_t       n_profiles;
+    const char  *method;
+    double       prune_frac;
+    int          force;
+    int          protect_super;
+    double       super_z;              /* 0 -> POE_SUPER_DEFAULT_Z */
+} poe_plan_opts;
+
+int poe_plan_build_opts(poe_plan **out, const poe_model *m,
+                        const poe_plan_opts *o, char *err, size_t errsz);
 
 int  poe_plan_write(const poe_plan *p, const char *path,
                     char *err, size_t errsz);
