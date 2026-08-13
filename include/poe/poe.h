@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define POE_VERSION "0.1.0-dev"
+#define POE_VERSION "0.1.0"
 
 /* One transformer block's MoE view. Tensor pointers are borrowed from the
  * underlying ingot handle and stay valid until poe_model_close(); any of
