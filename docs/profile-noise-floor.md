@@ -64,7 +64,12 @@ mostly reporting its own noise.
    weaker property than reproducibility across independent samples. The same
    corpus twice gives 0.59–0.64, not 0.95. Anything that compares two
    profiles must budget for that.
-3. **Fine granularity costs top-set reproducibility.** The 30B's top-25% set
+3. **The floor is a property of the metric, not of the corpus language.**
+   Measured again inside Chinese on unrelated text in a different script, it
+   lands at 0.551 against English's 0.566 (see
+   [language-experts.md](language-experts.md)). That reproducibility is what
+   lets a floor measured once be used to read a different comparison.
+4. **Fine granularity costs top-set reproducibility.** The 30B's top-25% set
    reproduces at 0.803 across samples; Qwen3.6's, with 256 experts instead
    of 128, at 0.567. More, smaller experts means the identity of the *most
    used* ones is less determined by the workload — while the cross-domain
