@@ -207,9 +207,21 @@ int main(void) {
 
     poe_model *narrow = NULL;
     if (poe_model_open(&narrow, "build/fixture-moe.gguf", err, sizeof err) == 0) {
+        /* A profile's arrays are n_layers x n_experts by contract, so the
+         * dimensions cannot be rewritten without resizing them: the shapes
+         * here are the *other* fixture's. Copying the struct and only
+         * relabelling it made poe_rank_experts read past the end of
+         * reap_mean — silently, because this call has to fail for an
+         * unrelated reason anyway. ASan is what noticed. */
         poe_profile npr = pr;
         npr.n_experts = narrow->expert_count;
         npr.n_layers = narrow->n_blocks;
+        npr.reap_mean = calloc((size_t)npr.n_layers * npr.n_experts,
+                               sizeof *npr.reap_mean);
+        if (npr.reap_mean == NULL) { poe_model_close(narrow); return 1; }
+        for (uint32_t l = 0; l < npr.n_layers; l++)
+            for (uint32_t e = 0; e < npr.n_experts; e++)
+                npr.reap_mean[(size_t)l * npr.n_experts + e] = (double)(e + 1);
         snprintf(npr.fingerprint, sizeof npr.fingerprint, "%s",
                  narrow->fingerprint);
         poe_split_opts no = o;
@@ -218,6 +230,7 @@ int main(void) {
         CHECK(poe_split(narrow, &no, "build/split-bad.gguf", &sb,
                         err, sizeof err) != 0,
               "rows too narrow for the types are refused (%s)", err);
+        free(npr.reap_mean);
         poe_model_close(narrow);
     }
 

@@ -1,0 +1,52 @@
+name: Memory Safety
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sanitizers:
+    name: ASan + UBSan + LeakSanitizer
+    # POE parses attacker-shaped input by construction — a GGUF is a file
+    # someone else produced, and the plan/profile readers take JSON. The
+    # suite is what exercises those parsers, so it is worth running under
+    # sanitizers rather than only compiling under them. Linux only:
+    # LeakSanitizer does not exist on macOS, and leaks are half the point.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build and run the suite under the sanitizers
+        run: make test CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+  warnings:
+    name: No warnings, three compilers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            cc: gcc
+          - runner: ubuntu-latest
+            cc: clang
+          - runner: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # -Werror is a gate here rather than the default build: someone
+      # compiling POE with a newer compiler should not be stopped by a
+      # warning, but nothing new should introduce one either.
+      - name: Build and test with -Werror
+        run: make test CC=${{ matrix.cc }} CFLAGS="-O2 -Werror"
