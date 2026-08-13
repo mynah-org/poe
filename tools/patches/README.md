@@ -243,9 +243,23 @@ cmake --build build --target test-backend-ops -j
 ./build/bin/test-backend-ops -o MUL_MAT_ID
 ```
 
-It reproduces on stock llama.cpp — `mmid.cu` is byte-identical between the
-pinned b1-69bf643 and upstream master 88 commits later, and no commit has
-touched it. The CPU backend is the reference the comparison is made against,
+Reported upstream as
+[ggml-org/llama.cpp#27015](https://github.com/ggml-org/llama.cpp/issues/27015),
+with this reproducer inline and the compaction change offered as a partial
+fix — partial because it removes the abort without closing the numerical
+disagreement, so it would land the added tests still failing.
+
+It reproduces on stock llama.cpp, where the run does not merely disagree with
+the CPU reference but **aborts**:
+
+```
+MUL_MAT_ID(type_a=q8_0,type_b=f32,n_mats=16,n_used=8,b=1,m=128,n=1,k=256,repeat_ids=2):
+CUDA error: an illegal memory access was encountered
+ggml/src/ggml-cuda/ggml-cuda.cu:106: CUDA error
+```
+
+`mmid.cu` is byte-identical between the pinned b1-69bf643 and upstream master
+88 commits later, and no commit has touched it. The CPU backend is the reference the comparison is made against,
 and nothing in `ggml.h` documents a uniqueness requirement on ids.
 
 ### Diagnostics left in the patch, deliberately
